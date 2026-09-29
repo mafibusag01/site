@@ -76,6 +76,10 @@ const generateBtn = document.getElementById("generateBtn");
 const statusEl = document.getElementById("status");
 const player = document.getElementById("player");
 const downloadLink = document.getElementById("downloadLink");
+const progressWrap = document.getElementById("progressWrap");
+const progressFill = document.getElementById("progressFill");
+const wordCountEl = document.getElementById("wordCount");
+const clearBtn = document.getElementById("clearBtn");
 
 let tts = null;
 let availableVoiceIds = null;
@@ -84,6 +88,25 @@ let activeAudioCtx = null;
 
 function setStatus(msg) {
   statusEl.textContent = msg;
+}
+
+function setProgress(pct) {
+  progressWrap.classList.remove("hidden");
+  progressFill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+}
+
+function hideProgress() {
+  progressWrap.classList.add("hidden");
+  progressFill.style.width = "0%";
+}
+
+// WASM inference blocks the main JS thread while it computes. Without yielding,
+// the browser queues up all our status/progress DOM updates but never actually
+// paints them until the whole synchronous work is done - making the UI *look*
+// frozen even though it's working (audio keeps playing underneath). Awaiting this
+// after each chunk forces a real repaint so the progress bar/status update live.
+function yieldToBrowser() {
+  return new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
 }
 
 function withTimeout(promise, ms, timeoutMessage) {
@@ -224,6 +247,23 @@ function populateNameOptions() {
 accentSelect.addEventListener("change", populateNameOptions);
 genderSelect.addEventListener("change", populateNameOptions);
 
+function updateWordCount() {
+  const text = textInput.value;
+  const trimmed = text.trim();
+  const words = trimmed.length > 0 ? trimmed.split(/\s+/).length : 0;
+  const chars = text.length;
+  wordCountEl.textContent = `${words.toLocaleString()} word${words === 1 ? "" : "s"} · ${chars.toLocaleString()} character${chars === 1 ? "" : "s"}`;
+}
+
+textInput.addEventListener("input", updateWordCount);
+updateWordCount(); // reflect the pre-filled placeholder text on load
+
+clearBtn.addEventListener("click", () => {
+  textInput.value = "";
+  updateWordCount();
+  textInput.focus();
+});
+
 // Splits long text into sentence-aware chunks so: (a) the model handles each request
 // reliably, (b) we can report incremental % progress, and (c) audio can start playing
 // before the entire input has been processed.
@@ -334,8 +374,10 @@ async function generate() {
   const totalChars = chunks.reduce((sum, c) => sum + c.length, 0);
 
   generateBtn.disabled = true;
-  generateBtn.textContent = "Generating...";
+  generateBtn.textContent = "Generating... 0%";
   downloadLink.classList.add("hidden");
+  player.classList.add("hidden");
+  setProgress(0);
 
   // Create the AudioContext synchronously (within this user-gesture click handler)
   // so mobile/desktop autoplay policies allow scheduled playback without an extra tap.
@@ -376,10 +418,18 @@ async function generate() {
       const elapsedSec = (performance.now() - startTime) / 1000;
       const remainingChars = totalChars - processedChars;
       const etaSec = remainingChars > 0 ? (elapsedSec / processedChars) * remainingChars : 0;
+      setProgress(pct);
+      generateBtn.textContent = `Generating... ${pct}%`;
       setStatus(
         `Generating speech... ${pct}% (chunk ${i + 1}/${chunks.length})` +
           (chunks.length > 1 ? ` · ${formatEta(etaSec)} · playing as it's ready` : "")
       );
+
+      // Force the browser to actually paint the update above before the next
+      // (blocking) chunk of WASM inference starts - otherwise the UI appears
+      // frozen even though audio is playing and work is progressing.
+      await yieldToBrowser();
+      if (myGenerationId !== currentGenerationId) return;
     }
 
     if (myGenerationId !== currentGenerationId) return;
@@ -389,9 +439,11 @@ async function generate() {
     const blob = encodeWav(combined, sampleRateGlobal);
     const url = URL.createObjectURL(blob);
     player.src = url;
+    player.classList.remove("hidden");
     downloadLink.href = url;
     downloadLink.classList.remove("hidden");
 
+    setProgress(100);
     setStatus(`Done! ${chunks.length > 1 ? "Full audio ready below." : "Playing audio."}`);
   } catch (err) {
     console.error("Generate failed:", err);
@@ -400,6 +452,9 @@ async function generate() {
     if (myGenerationId === currentGenerationId) {
       generateBtn.disabled = false;
       generateBtn.textContent = "Generate Speech";
+      setTimeout(() => {
+        if (myGenerationId === currentGenerationId) hideProgress();
+      }, 1500);
     }
   }
 }

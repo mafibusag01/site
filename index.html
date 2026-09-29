@@ -13,6 +13,11 @@
 
     <textarea id="textInput" rows="6" placeholder="Type or paste text here...">Hello! This is a free, open-source text-to-speech demo running entirely in your browser.</textarea>
 
+    <div class="textarea-toolbar">
+      <span id="wordCount" class="word-count">0 words · 0 characters</span>
+      <button id="clearBtn" type="button" class="clear-btn">Clear</button>
+    </div>
+
     <div class="row">
       <label for="accentSelect">Accent</label>
       <select id="accentSelect" disabled>
@@ -56,7 +61,11 @@
 
     <p id="status" class="status">Loading voice model, please wait (first load can take a bit)...</p>
 
-    <audio id="player" controls playsinline></audio>
+    <div id="progressWrap" class="progress-wrap hidden">
+      <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+    </div>
+
+    <audio id="player" controls playsinline class="hidden"></audio>
     <a id="downloadLink" href="#" download="speech.wav" class="hidden">Download audio</a>
   </main>
 

@@ -22,6 +22,25 @@
 
 const MAX_CHUNK_CHARS = 350; // sentence-aware chunk size fed to the model per call
 
+const isMobile = /Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent);
+
+// PARALLEL BATCH PROCESSING: instead of generating one chunk at a time, we run a
+// pool of Web Workers - each with its OWN fully-loaded copy of the model - and
+// hand out chunks to them round-robin, N at a time. Once a batch of N chunks all
+// finish, they're stitched into the output (in the correct order) and playback is
+// scheduled, then the next batch of N starts. This is a real speed multiplier
+// since chunks compute truly in parallel (separate threads), not just interleaved.
+//
+// Trade-off: each worker in the pool loads an independent copy of the model, so
+// RAM usage scales with pool size (5 workers ~= 5x the model's memory footprint).
+// Desktops can handle a bigger pool; mobile (especially Android, which we already
+// keep WASM-only for driver stability) gets a small pool to avoid tab crashes.
+// This is just the DEFAULT auto-detected value - the user can override it via the
+// "Parallel" dropdown in the UI (see userPoolSize below), e.g. to dial it down if
+// their device struggles with the RAM footprint of multiple loaded model copies.
+const AUTO_POOL_SIZE = isMobile ? 2 : Math.min(5, Math.max(2, (navigator.hardwareConcurrency || 4) - 1));
+let userPoolSize = AUTO_POOL_SIZE; // current effective pool size - set by the dropdown
+
 // Kokoro-82M voice IDs grouped by accent + gender.
 const KOKORO_VOICES = {
   american: {
@@ -115,14 +134,23 @@ const progressFill = document.getElementById("progressFill");
 const wordCountEl = document.getElementById("wordCount");
 const clearBtn = document.getElementById("clearBtn");
 const engineNote = document.getElementById("engineNote");
+const parallelSelect = document.getElementById("parallelSelect");
 
-let worker = null;
+let workerPool = []; // array of { worker, ready } - each worker holds its OWN loaded model copy
 let availableVoiceIds = null; // Set, from engine "engineReady" message (kokoro only)
-let currentEngine = null; // engine actually loaded in the worker right now
+let currentEngine = null; // engine actually loaded in the pool right now
 let currentGenerationId = 0; // guards against overlapping generate() calls
 let activeAudioCtx = null;
 let pendingChunkResolvers = new Map(); // chunkId -> {resolve, reject}
 let chunkIdCounter = 0;
+let readyWorkerCount = 0;
+let engineLoadErrorReported = false;
+// Bumped every time loadEngine() runs. Each worker created remembers the generation
+// it belongs to; if a stale message arrives from a worker that was terminated by a
+// LATER loadEngine() call (Worker.terminate() does not un-send messages already
+// queued before termination), we ignore it instead of letting it overwrite
+// currentEngine/status with the wrong (old) engine's info.
+let engineGeneration = 0;
 
 function setStatus(msg) {
   statusEl.textContent = msg;
@@ -145,25 +173,41 @@ function formatEta(seconds) {
   return m > 0 ? `~${m}m ${s}s left` : `~${s}s left`;
 }
 
-function createWorker() {
-  worker = new Worker("worker.js", { type: "module" });
-  worker.onmessage = (e) => {
+// Creates one worker and wires its message handling. `index` is used only for
+// the first worker's load-progress messages (avoids N overlapping progress logs).
+// `myGeneration` pins this worker to the loadEngine() call that created it - any
+// message it sends after a NEWER loadEngine() has started is discarded, since
+// Worker.terminate() can't retroactively cancel messages already in flight.
+function createPoolWorker(index, myGeneration) {
+  const w = new Worker("worker.js", { type: "module" });
+  const entry = { worker: w, ready: false, busy: false };
+
+  w.onmessage = (e) => {
+    if (myGeneration !== engineGeneration) return; // stale worker from a superseded loadEngine() call
     const msg = e.data;
     if (msg.type === "loadProgress") {
-      setStatus(`Loading voice model... ${msg.pct}% (first visit only)`);
+      if (index === 0) setStatus(`Loading voice model... ${msg.pct}% (first visit only)`);
     } else if (msg.type === "loadStatus") {
-      setStatus(msg.status);
+      if (index === 0) setStatus(msg.status);
     } else if (msg.type === "engineReady") {
+      entry.ready = true;
+      readyWorkerCount++;
       currentEngine = msg.engine;
-      availableVoiceIds = msg.voices ? new Set(msg.voices) : null;
-      populateNameOptions();
-      setControlsEnabled(true);
-      setStatus(
-        `${msg.engine === "piper" ? "Piper (fast)" : "Kokoro (quality)"} model loaded` +
-          (msg.backendUsed === "webgpu" ? " (GPU-accelerated)" : "") +
-          ". Ready to generate speech!"
-      );
+      if (index === 0) availableVoiceIds = msg.voices ? new Set(msg.voices) : null;
+      if (readyWorkerCount === workerPool.length) {
+        populateNameOptions();
+        setControlsEnabled(true);
+        setStatus(
+          `${msg.engine === "piper" ? "Piper (fast)" : "Kokoro (quality)"} model loaded ` +
+            `(${workerPool.length}x parallel workers` +
+            (msg.backendUsed === "webgpu" ? ", GPU-accelerated" : "") +
+            "). Ready to generate speech!"
+        );
+      } else {
+        setStatus(`Loading voice model... (${readyWorkerCount}/${workerPool.length} workers ready)`);
+      }
     } else if (msg.type === "chunkDone") {
+      entry.busy = false;
       const resolver = pendingChunkResolvers.get(msg.chunkId);
       if (resolver) {
         pendingChunkResolvers.delete(msg.chunkId);
@@ -171,22 +215,44 @@ function createWorker() {
       }
     } else if (msg.type === "error") {
       if (msg.chunkId != null && pendingChunkResolvers.has(msg.chunkId)) {
+        entry.busy = false;
         const resolver = pendingChunkResolvers.get(msg.chunkId);
         pendingChunkResolvers.delete(msg.chunkId);
         resolver.reject(new Error(msg.message));
-      } else {
+      } else if (!engineLoadErrorReported) {
+        engineLoadErrorReported = true;
         onEngineLoadError(msg.message);
       }
     }
   };
-  worker.onerror = (e) => {
+  w.onerror = (e) => {
+    if (myGeneration !== engineGeneration) return; // stale worker from a superseded loadEngine() call
     console.error("Worker error:", e);
-    onEngineLoadError(e.message || "Unknown worker error");
+    entry.busy = false;
+    if (!engineLoadErrorReported) {
+      engineLoadErrorReported = true;
+      onEngineLoadError(e.message || "Unknown worker error");
+    }
   };
+
+  return entry;
+}
+
+function terminatePool() {
+  for (const entry of workerPool) {
+    try {
+      entry.worker.terminate();
+    } catch (e) {
+      /* ignore */
+    }
+  }
+  workerPool = [];
+  readyWorkerCount = 0;
 }
 
 function setControlsEnabled(enabled) {
   engineSelect.disabled = !enabled;
+  parallelSelect.disabled = !enabled;
   accentSelect.disabled = !enabled;
   genderSelect.disabled = !enabled;
   nameSelect.disabled = !enabled;
@@ -211,11 +277,22 @@ function onEngineLoadError(rawMsg) {
 function loadEngine(engine) {
   setControlsEnabled(false);
   nameSelect.innerHTML = "<option>Loading...</option>";
-  setStatus(`Loading ${engine === "piper" ? "Piper (fast)" : "Kokoro (quality)"} engine...`);
+  setStatus(`Loading ${engine === "piper" ? "Piper (fast)" : "Kokoro (quality)"} engine (${userPoolSize}x parallel workers)...`);
   setProgress(0);
   progressWrap.classList.remove("hidden");
-  if (!worker) createWorker();
-  worker.postMessage({ type: "loadEngine", engine });
+
+  engineGeneration++; // invalidate any in-flight messages from the previous pool
+  const myGeneration = engineGeneration;
+  currentEngine = null; // don't let a stale "ready" for the old engine be mistaken for the new one
+
+  terminatePool(); // drop any previously loaded engine's workers, then rebuild the pool
+  engineLoadErrorReported = false;
+  for (let i = 0; i < userPoolSize; i++) {
+    workerPool.push(createPoolWorker(i, myGeneration));
+  }
+  for (const entry of workerPool) {
+    entry.worker.postMessage({ type: "loadEngine", engine });
+  }
 }
 
 engineSelect.addEventListener("change", () => {
@@ -226,6 +303,17 @@ engineSelect.addEventListener("change", () => {
       : "🎙 Quality mode: natural, expressive voice. Slower on long text.";
   loadEngine(engineSelect.value);
 });
+
+// Changing parallel worker count rebuilds the whole pool (each worker needs its
+// own freshly-loaded model copy), so this is disabled while a generation is
+// running (see setControlsEnabled) and simply reloads the current engine.
+parallelSelect.addEventListener("change", () => {
+  userPoolSize = parseInt(parallelSelect.value, 10) || 1;
+  loadEngine(engineSelect.value);
+});
+
+// Reflect the auto-detected default in the dropdown on first load.
+parallelSelect.value = String(AUTO_POOL_SIZE);
 
 function populateNameOptions() {
   const accent = accentSelect.value;
@@ -340,15 +428,16 @@ function encodeWav(samples, sampleRate) {
   return new Blob([view], { type: "audio/wav" });
 }
 
-// Sends one chunk to the worker and resolves when that chunk's audio comes back.
-// Because inference now runs entirely inside the worker, this await does NOT
-// block the main thread - the browser stays fully interactive (scrolling, clicks,
-// progress bar animation) while the worker crunches the chunk in the background.
-function generateChunkInWorker(text, voiceId, speed) {
+// Sends one chunk to a specific pool worker and resolves when that chunk's audio
+// comes back. Because inference runs entirely inside worker threads, this await
+// does NOT block the main thread - the browser stays fully interactive (scrolling,
+// clicks, progress bar animation) while workers crunch chunks in the background.
+function generateChunkOnWorker(workerEntry, text, voiceId, speed) {
   const chunkId = ++chunkIdCounter;
+  workerEntry.busy = true;
   return new Promise((resolve, reject) => {
     pendingChunkResolvers.set(chunkId, { resolve, reject });
-    worker.postMessage({ type: "generateChunk", chunkId, text, voiceId, speed });
+    workerEntry.worker.postMessage({ type: "generateChunk", chunkId, text, voiceId, speed });
   });
 }
 
@@ -381,6 +470,8 @@ async function generate() {
 
   generateBtn.disabled = true;
   generateBtn.textContent = "Generating... 0%";
+  engineSelect.disabled = true; // switching engine/pool size mid-run would orphan the pool
+  parallelSelect.disabled = true;
   downloadLink.classList.add("hidden");
   player.classList.add("hidden");
   setProgress(0);
@@ -392,34 +483,58 @@ async function generate() {
   activeAudioCtx = audioCtx;
   let nextStartTime = audioCtx.currentTime + 0.05;
 
-  const allChunkSamples = [];
+  const allChunkSamples = new Array(chunks.length);
   let sampleRateGlobal = 24000;
   let processedChars = 0;
   const startTime = performance.now();
+  const batchSize = Math.max(1, workerPool.length);
 
   try {
-    for (let i = 0; i < chunks.length; i++) {
+    // BATCH PARALLEL PROCESSING: take up to `batchSize` chunks at a time and hand
+    // one to each free worker in the pool - they compute simultaneously on
+    // separate threads. Once the whole batch resolves, stitch/schedule that
+    // batch's audio in the correct original order, update progress once, then
+    // move on to the next batch. This is a genuine speed multiplier (not just
+    // interleaving) since the workers are truly running concurrently.
+    for (let batchStart = 0; batchStart < chunks.length; batchStart += batchSize) {
       if (myGenerationId !== currentGenerationId) return; // superseded by a newer click
 
-      // This await yields control back to the browser's event loop immediately -
-      // the actual computation happens in the worker thread, not here - so the
-      // page remains scrollable/clickable the entire time this is pending.
-      const { samples, sampleRate } = await generateChunkInWorker(chunks[i], voiceId, speed);
+      const batchIndices = [];
+      for (let i = batchStart; i < Math.min(batchStart + batchSize, chunks.length); i++) batchIndices.push(i);
+
+      setStatus(
+        `Generating speech... chunks ${batchIndices[0] + 1}-${batchIndices[batchIndices.length - 1] + 1}` +
+          `/${chunks.length} in parallel (${batchIndices.length}x workers)...`
+      );
+
+      // Fire off this batch's chunks to distinct workers, in order, and await them
+      // all together - this is what makes them run truly in parallel.
+      const batchPromises = batchIndices.map((chunkIdx, slot) =>
+        generateChunkOnWorker(workerPool[slot], chunks[chunkIdx], voiceId, speed)
+      );
+      const batchResults = await Promise.all(batchPromises);
       if (myGenerationId !== currentGenerationId) return;
 
-      sampleRateGlobal = sampleRate;
-      allChunkSamples.push(samples);
+      // Schedule/stitch results IN ORDER (batch completion order from Promise.all
+      // already matches batchIndices order, regardless of which worker finished first).
+      for (let b = 0; b < batchIndices.length; b++) {
+        const chunkIdx = batchIndices[b];
+        const { samples, sampleRate } = batchResults[b];
+        sampleRateGlobal = sampleRate;
+        allChunkSamples[chunkIdx] = samples;
 
-      const audioBuffer = audioCtx.createBuffer(1, samples.length, sampleRate);
-      audioBuffer.copyToChannel(samples, 0);
-      const source = audioCtx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(audioCtx.destination);
-      const startAt = Math.max(nextStartTime, audioCtx.currentTime);
-      source.start(startAt);
-      nextStartTime = startAt + audioBuffer.duration;
+        const audioBuffer = audioCtx.createBuffer(1, samples.length, sampleRate);
+        audioBuffer.copyToChannel(samples, 0);
+        const source = audioCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioCtx.destination);
+        const startAt = Math.max(nextStartTime, audioCtx.currentTime);
+        source.start(startAt);
+        nextStartTime = startAt + audioBuffer.duration;
 
-      processedChars += chunks[i].length;
+        processedChars += chunks[chunkIdx].length;
+      }
+
       const pct = Math.round((processedChars / totalChars) * 100);
       const elapsedSec = (performance.now() - startTime) / 1000;
       const remainingChars = totalChars - processedChars;
@@ -427,7 +542,7 @@ async function generate() {
       setProgress(pct);
       generateBtn.textContent = `Generating... ${pct}%`;
       setStatus(
-        `Generating speech... ${pct}% (chunk ${i + 1}/${chunks.length})` +
+        `Generating speech... ${pct}% (chunk ${Math.min(batchStart + batchSize, chunks.length)}/${chunks.length})` +
           (chunks.length > 1 ? ` · ${formatEta(etaSec)} · playing as it's ready` : "")
       );
     }
@@ -451,6 +566,8 @@ async function generate() {
     if (myGenerationId === currentGenerationId) {
       generateBtn.disabled = false;
       generateBtn.textContent = "Generate Speech";
+      engineSelect.disabled = false;
+      parallelSelect.disabled = false;
       setTimeout(() => {
         if (myGenerationId === currentGenerationId) hideProgress();
       }, 1500);

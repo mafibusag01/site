@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
 <title>Free AI Text-to-Speech</title>
-<link rel="stylesheet" href="style.css" />
+<link rel="stylesheet" href="style.css?v=2" />
 </head>
 <body>
   <main class="card">
@@ -26,6 +26,18 @@
       </select>
     </div>
     <p id="engineNote" class="engine-note">🎙 Quality mode: natural, expressive voice. Slower on long text.</p>
+
+    <div class="row">
+      <label for="parallelSelect">Parallel</label>
+      <select id="parallelSelect">
+        <option value="1">1 (sequential)</option>
+        <option value="2">2 workers</option>
+        <option value="3">3 workers</option>
+        <option value="4">4 workers</option>
+        <option value="5">5 workers</option>
+      </select>
+    </div>
+    <p id="parallelNote" class="engine-note">Higher = faster, but uses more RAM (each worker loads its own copy of the model).</p>
 
     <div class="row">
       <label for="accentSelect">Accent</label>
@@ -84,6 +96,6 @@
     · 100% client-side, no API key required
   </footer>
 
-  <script type="module" src="script.js"></script>
+  <script type="module" src="script.js?v=2"></script>
 </body>
 </html>

@@ -1,30 +1,29 @@
 // Free, open-source, 100% client-side Text-to-Speech
-// Model: onnx-community/Kokoro-82M-v1.0-ONNX (Kokoro-82M, Apache-2.0, hosted on Hugging Face)
-// Library: kokoro-js (https://www.npmjs.com/package/kokoro-js) - runs the model fully in the browser
+// Two selectable engines, both run fully in-browser via a Web Worker (see worker.js):
+//   - "kokoro": onnx-community/Kokoro-82M-v1.0-ONNX (kokoro-js). Natural, expressive
+//     voice, but slower (~1-2x realtime on CPU). Good default for shorter texts.
+//   - "piper": @diffusionstudio/vits-web (Piper/VITS). ~15-20x realtime on CPU -
+//     roughly 5,000 words in about a minute - but a more robotic/synthetic voice.
+//     Best for bulk/long-text jobs where speed matters more than natural delivery.
 // No API key, no server, no per-request cost.
 //
-// MOBILE COMPATIBILITY: WebGPU support on Android Chrome is inconsistent across
-// devices/drivers and can silently hang instead of failing cleanly (confirmed on real
-// devices). So on mobile we ALWAYS use the WASM backend (proven reliable). On desktop
-// browsers we try WebGPU first (much faster for long texts) and automatically fall
-// back to WASM if it fails or times out.
+// MAIN-THREAD RESPONSIVENESS: all model loading + inference now happens inside a
+// dedicated Web Worker (worker.js), not on the main thread. Previously, WASM
+// inference blocked the main thread for the FULL duration of each chunk's
+// computation - not just between chunks - so the page (including scrolling and
+// the Generate button) could still hang mid-chunk even with inter-chunk yields.
+// Running the model in a worker keeps the main thread 100% free for scrolling,
+// clicks, and smooth progress-bar animation regardless of how long a chunk takes.
 //
-// LONG TEXT HANDLING: text is split into sentence-sized chunks and generated one at a
-// time. Audio for each chunk starts playing via the Web Audio API as soon as it's
-// ready (instead of waiting for the whole 10k-word input to finish), and the status
-// bar shows live % progress + an ETA. All chunks are also stitched into one combined
-// WAV file for download once generation completes.
+// LONG TEXT HANDLING: text is split into sentence-sized chunks and generated one
+// at a time via the worker. Audio for each chunk starts playing via the Web Audio
+// API as soon as it's ready, and the status bar shows live % progress + an ETA.
+// All chunks are stitched into one combined WAV file for download once complete.
 
-const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
-const KOKORO_CDN_URL = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm";
-const LOAD_TIMEOUT_MS = 90_000; // 90s - mobile data can be slow for the model download
-const WEBGPU_LOAD_TIMEOUT_MS = 25_000; // shorter probe - if WebGPU stalls, bail to WASM fast
 const MAX_CHUNK_CHARS = 350; // sentence-aware chunk size fed to the model per call
 
-const isMobile = /Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent);
-
-// Known Kokoro-82M voice IDs grouped by accent + gender, with friendly labels.
-const VOICE_CATALOG = {
+// Kokoro-82M voice IDs grouped by accent + gender.
+const KOKORO_VOICES = {
   american: {
     female: [
       { id: "af_heart", label: "Heart (default)" },
@@ -67,7 +66,42 @@ const VOICE_CATALOG = {
   },
 };
 
+// Piper voice IDs (Rhasspy Piper Voices). Fewer style variations per voice - one
+// model = one speaker - but dramatically faster inference.
+const PIPER_VOICES = {
+  american: {
+    female: [
+      { id: "en_US-amy-medium", label: "Amy (default)" },
+      { id: "en_US-lessac-medium", label: "Lessac" },
+      { id: "en_US-hfc_female-medium", label: "HFC Female" },
+      { id: "en_US-kristin-medium", label: "Kristin" },
+    ],
+    male: [
+      { id: "en_US-ryan-medium", label: "Ryan (default)" },
+      { id: "en_US-joe-medium", label: "Joe" },
+      { id: "en_US-john-medium", label: "John" },
+      { id: "en_US-hfc_male-medium", label: "HFC Male" },
+    ],
+  },
+  british: {
+    female: [
+      { id: "en_GB-jenny_dioco-medium", label: "Jenny (default)" },
+      { id: "en_GB-alba-medium", label: "Alba" },
+      { id: "en_GB-southern_english_female-low", label: "Southern English Female" },
+    ],
+    male: [
+      { id: "en_GB-alan-medium", label: "Alan (default)" },
+      { id: "en_GB-northern_english_male-medium", label: "Northern English Male" },
+    ],
+  },
+};
+
+function currentVoiceCatalog() {
+  return engineSelect.value === "piper" ? PIPER_VOICES : KOKORO_VOICES;
+}
+
 const textInput = document.getElementById("textInput");
+const engineSelect = document.getElementById("engineSelect");
 const accentSelect = document.getElementById("accentSelect");
 const genderSelect = document.getElementById("genderSelect");
 const nameSelect = document.getElementById("nameSelect");
@@ -80,11 +114,15 @@ const progressWrap = document.getElementById("progressWrap");
 const progressFill = document.getElementById("progressFill");
 const wordCountEl = document.getElementById("wordCount");
 const clearBtn = document.getElementById("clearBtn");
+const engineNote = document.getElementById("engineNote");
 
-let tts = null;
-let availableVoiceIds = null;
+let worker = null;
+let availableVoiceIds = null; // Set, from engine "engineReady" message (kokoro only)
+let currentEngine = null; // engine actually loaded in the worker right now
 let currentGenerationId = 0; // guards against overlapping generate() calls
 let activeAudioCtx = null;
+let pendingChunkResolvers = new Map(); // chunkId -> {resolve, reject}
+let chunkIdCounter = 0;
 
 function setStatus(msg) {
   statusEl.textContent = msg;
@@ -100,23 +138,6 @@ function hideProgress() {
   progressFill.style.width = "0%";
 }
 
-// WASM inference blocks the main JS thread while it computes. Without yielding,
-// the browser queues up all our status/progress DOM updates but never actually
-// paints them until the whole synchronous work is done - making the UI *look*
-// frozen even though it's working (audio keeps playing underneath). Awaiting this
-// after each chunk forces a real repaint so the progress bar/status update live.
-function yieldToBrowser() {
-  return new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
-}
-
-function withTimeout(promise, ms, timeoutMessage) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(timeoutMessage)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
 function formatEta(seconds) {
   if (!isFinite(seconds) || seconds < 0) return "";
   const m = Math.floor(seconds / 60);
@@ -124,111 +145,92 @@ function formatEta(seconds) {
   return m > 0 ? `~${m}m ${s}s left` : `~${s}s left`;
 }
 
-async function loadKokoroLibrary() {
-  try {
-    const mod = await withTimeout(
-      import(/* @vite-ignore */ KOKORO_CDN_URL),
-      30_000,
-      "Timed out loading the kokoro-js library itself from the CDN."
-    );
-    if (!mod.KokoroTTS) throw new Error("kokoro-js loaded but KokoroTTS export was not found.");
-    return mod.KokoroTTS;
-  } catch (importErr) {
-    throw new Error("Could not load the kokoro-js library: " + importErr.message);
-  }
-}
-
-async function init() {
-  try {
-    setStatus("Loading TTS engine (kokoro-js)...");
-    const KokoroTTS = await loadKokoroLibrary();
-
-    const onProgress = (progress) => {
-      if (progress && typeof progress.progress === "number") {
-        const pct = Math.round(progress.progress);
-        setStatus(`Loading voice model... ${pct}% (downloading, first visit only)`);
-      } else if (progress && progress.status) {
-        setStatus(`Loading voice model... (${progress.status})`);
-      }
-    };
-
-    // Desktop: try WebGPU first (much faster inference for long texts), with a
-    // fast fallback to WASM if it stalls or errors. Mobile: skip straight to WASM,
-    // since WebGPU on Android Chrome has been observed to hang silently.
-    let backendUsed = "wasm";
-    if (!isMobile && navigator.gpu) {
-      try {
-        setStatus("Loading voice model (GPU-accelerated)... 0%");
-        tts = await withTimeout(
-          KokoroTTS.from_pretrained(MODEL_ID, {
-            dtype: "fp32",
-            device: "webgpu",
-            progress_callback: onProgress,
-          }),
-          WEBGPU_LOAD_TIMEOUT_MS,
-          "WebGPU load timed out"
-        );
-        backendUsed = "webgpu";
-      } catch (gpuErr) {
-        console.warn("WebGPU load failed, falling back to WASM:", gpuErr);
-        tts = null;
-      }
-    }
-
-    if (!tts) {
-      setStatus("Loading voice model... 0% (downloading ~80MB, first visit only)");
-      const loadPromise = KokoroTTS.from_pretrained(MODEL_ID, {
-        dtype: "q8",
-        device: "wasm",
-        progress_callback: onProgress,
-      });
-      tts = await withTimeout(
-        loadPromise,
-        LOAD_TIMEOUT_MS,
-        "Model download timed out. Your connection may be too slow/unstable, or Hugging Face's " +
-          "servers may be temporarily unreachable from your network. Try switching to Wi-Fi, " +
-          "disabling any VPN/ad-blocker, and reloading the page."
+function createWorker() {
+  worker = new Worker("worker.js", { type: "module" });
+  worker.onmessage = (e) => {
+    const msg = e.data;
+    if (msg.type === "loadProgress") {
+      setStatus(`Loading voice model... ${msg.pct}% (first visit only)`);
+    } else if (msg.type === "loadStatus") {
+      setStatus(msg.status);
+    } else if (msg.type === "engineReady") {
+      currentEngine = msg.engine;
+      availableVoiceIds = msg.voices ? new Set(msg.voices) : null;
+      populateNameOptions();
+      setControlsEnabled(true);
+      setStatus(
+        `${msg.engine === "piper" ? "Piper (fast)" : "Kokoro (quality)"} model loaded` +
+          (msg.backendUsed === "webgpu" ? " (GPU-accelerated)" : "") +
+          ". Ready to generate speech!"
       );
+    } else if (msg.type === "chunkDone") {
+      const resolver = pendingChunkResolvers.get(msg.chunkId);
+      if (resolver) {
+        pendingChunkResolvers.delete(msg.chunkId);
+        resolver.resolve({ samples: msg.samples, sampleRate: msg.sampleRate });
+      }
+    } else if (msg.type === "error") {
+      if (msg.chunkId != null && pendingChunkResolvers.has(msg.chunkId)) {
+        const resolver = pendingChunkResolvers.get(msg.chunkId);
+        pendingChunkResolvers.delete(msg.chunkId);
+        resolver.reject(new Error(msg.message));
+      } else {
+        onEngineLoadError(msg.message);
+      }
     }
-
-    if (tts.voices && typeof tts.voices === "object") {
-      availableVoiceIds = new Set(Object.keys(tts.voices));
-    } else if (typeof tts.list_voices === "function") {
-      availableVoiceIds = new Set(tts.list_voices());
-    }
-
-    populateNameOptions();
-
-    accentSelect.disabled = false;
-    genderSelect.disabled = false;
-    nameSelect.disabled = false;
-    generateBtn.disabled = false;
-    setStatus(
-      `Model loaded (${backendUsed === "webgpu" ? "GPU-accelerated" : "CPU"} mode). Ready to generate speech!`
-    );
-  } catch (err) {
-    console.error("KokoroTTS load failed:", err);
-    const rawMsg = err && err.message ? err.message : "unknown error";
-    const friendlyMsg =
-      rawMsg === "Failed to fetch"
-        ? "Could not reach the model server (huggingface.co). This is usually caused by an " +
-          "ad-blocker/privacy extension, VPN, or firewall blocking that domain. Try an " +
-          "Incognito window with extensions disabled, or a different network."
-        : rawMsg;
-    setStatus("⚠ Failed to load the voice model: " + friendlyMsg + " — Tap to retry.");
-    statusEl.style.cursor = "pointer";
-    statusEl.onclick = () => {
-      statusEl.style.cursor = "default";
-      statusEl.onclick = null;
-      init();
-    };
-  }
+  };
+  worker.onerror = (e) => {
+    console.error("Worker error:", e);
+    onEngineLoadError(e.message || "Unknown worker error");
+  };
 }
+
+function setControlsEnabled(enabled) {
+  engineSelect.disabled = !enabled;
+  accentSelect.disabled = !enabled;
+  genderSelect.disabled = !enabled;
+  nameSelect.disabled = !enabled;
+  generateBtn.disabled = !enabled;
+}
+
+function onEngineLoadError(rawMsg) {
+  const friendlyMsg =
+    rawMsg === "Failed to fetch"
+      ? "Could not reach the model server. This is usually caused by an ad-blocker/privacy " +
+        "extension, VPN, or firewall. Try an Incognito window with extensions disabled, or a different network."
+      : rawMsg;
+  setStatus("⚠ Failed to load the voice model: " + friendlyMsg + " — Tap to retry.");
+  statusEl.style.cursor = "pointer";
+  statusEl.onclick = () => {
+    statusEl.style.cursor = "default";
+    statusEl.onclick = null;
+    loadEngine(engineSelect.value);
+  };
+}
+
+function loadEngine(engine) {
+  setControlsEnabled(false);
+  nameSelect.innerHTML = "<option>Loading...</option>";
+  setStatus(`Loading ${engine === "piper" ? "Piper (fast)" : "Kokoro (quality)"} engine...`);
+  setProgress(0);
+  progressWrap.classList.remove("hidden");
+  if (!worker) createWorker();
+  worker.postMessage({ type: "loadEngine", engine });
+}
+
+engineSelect.addEventListener("change", () => {
+  hideProgress();
+  engineNote.textContent =
+    engineSelect.value === "piper"
+      ? "⚡ Fast mode: ~15-20x realtime, great for long/bulk text. Voice sounds more synthetic."
+      : "🎙 Quality mode: natural, expressive voice. Slower on long text.";
+  loadEngine(engineSelect.value);
+});
 
 function populateNameOptions() {
   const accent = accentSelect.value;
   const gender = genderSelect.value;
-  let options = VOICE_CATALOG[accent][gender];
+  let options = currentVoiceCatalog()[accent][gender];
 
   if (availableVoiceIds) {
     const filtered = options.filter((o) => availableVoiceIds.has(o.id));
@@ -274,7 +276,6 @@ function splitTextIntoChunks(text, maxLen = MAX_CHUNK_CHARS) {
 
   for (let sentence of sentences) {
     if (sentence.length > maxLen) {
-      // Extremely long "sentence" (no punctuation) - hard split on spaces.
       const words = sentence.split(/(\s+)/);
       for (const w of words) {
         if ((current + w).length > maxLen) {
@@ -339,10 +340,16 @@ function encodeWav(samples, sampleRate) {
   return new Blob([view], { type: "audio/wav" });
 }
 
-function extractSamples(audio) {
-  const samples = audio.audio || audio.data;
-  const sampleRate = audio.sampling_rate || audio.sample_rate || 24000;
-  return { samples: samples instanceof Float32Array ? samples : new Float32Array(samples), sampleRate };
+// Sends one chunk to the worker and resolves when that chunk's audio comes back.
+// Because inference now runs entirely inside the worker, this await does NOT
+// block the main thread - the browser stays fully interactive (scrolling, clicks,
+// progress bar animation) while the worker crunches the chunk in the background.
+function generateChunkInWorker(text, voiceId, speed) {
+  const chunkId = ++chunkIdCounter;
+  return new Promise((resolve, reject) => {
+    pendingChunkResolvers.set(chunkId, { resolve, reject });
+    worker.postMessage({ type: "generateChunk", chunkId, text, voiceId, speed });
+  });
 }
 
 async function generate() {
@@ -351,12 +358,11 @@ async function generate() {
     setStatus("Please enter some text first.");
     return;
   }
-  if (!tts) {
+  if (!currentEngine) {
     setStatus("Model is not ready yet.");
     return;
   }
 
-  // Invalidate any previous in-flight generation and stop its audio.
   const myGenerationId = ++currentGenerationId;
   if (activeAudioCtx) {
     try {
@@ -395,15 +401,15 @@ async function generate() {
     for (let i = 0; i < chunks.length; i++) {
       if (myGenerationId !== currentGenerationId) return; // superseded by a newer click
 
-      const audio = await tts.generate(chunks[i], { voice: voiceId, speed });
+      // This await yields control back to the browser's event loop immediately -
+      // the actual computation happens in the worker thread, not here - so the
+      // page remains scrollable/clickable the entire time this is pending.
+      const { samples, sampleRate } = await generateChunkInWorker(chunks[i], voiceId, speed);
       if (myGenerationId !== currentGenerationId) return;
 
-      const { samples, sampleRate } = extractSamples(audio);
       sampleRateGlobal = sampleRate;
       allChunkSamples.push(samples);
 
-      // Schedule this chunk to play immediately after the previous one - the user
-      // starts hearing audio after just the FIRST chunk, not after all of them.
       const audioBuffer = audioCtx.createBuffer(1, samples.length, sampleRate);
       audioBuffer.copyToChannel(samples, 0);
       const source = audioCtx.createBufferSource();
@@ -424,17 +430,10 @@ async function generate() {
         `Generating speech... ${pct}% (chunk ${i + 1}/${chunks.length})` +
           (chunks.length > 1 ? ` · ${formatEta(etaSec)} · playing as it's ready` : "")
       );
-
-      // Force the browser to actually paint the update above before the next
-      // (blocking) chunk of WASM inference starts - otherwise the UI appears
-      // frozen even though audio is playing and work is progressing.
-      await yieldToBrowser();
-      if (myGenerationId !== currentGenerationId) return;
     }
 
     if (myGenerationId !== currentGenerationId) return;
 
-    // Stitch every chunk together into one downloadable WAV file.
     const combined = concatFloat32Arrays(allChunkSamples);
     const blob = encodeWav(combined, sampleRateGlobal);
     const url = URL.createObjectURL(blob);
@@ -461,4 +460,5 @@ async function generate() {
 
 generateBtn.addEventListener("click", generate);
 
-init();
+// Boot: load the default engine (Kokoro) in the worker.
+loadEngine(engineSelect.value);

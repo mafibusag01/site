@@ -81,6 +81,13 @@ textarea:focus {
   background: #e5e7eb;
 }
 
+.engine-note {
+  margin: -6px 0 0;
+  font-size: 0.78rem;
+  color: #6366f1;
+  text-align: center;
+}
+
 .row {
   display: flex;
   align-items: center;

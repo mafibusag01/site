@@ -9,7 +9,7 @@
 <body>
   <main class="card">
     <h1>🔊 AI Text-to-Speech</h1>
-    <p class="subtitle">Powered by <strong>Kokoro-82M</strong> (open-source, runs free in your browser)</p>
+    <p class="subtitle">Powered by <strong>Kokoro-82M</strong> or <strong>Piper</strong> (open-source, runs free in your browser)</p>
 
     <textarea id="textInput" rows="6" placeholder="Type or paste text here...">Hello! This is a free, open-source text-to-speech demo running entirely in your browser.</textarea>
 
@@ -17,6 +17,15 @@
       <span id="wordCount" class="word-count">0 words · 0 characters</span>
       <button id="clearBtn" type="button" class="clear-btn">Clear</button>
     </div>
+
+    <div class="row">
+      <label for="engineSelect">Engine</label>
+      <select id="engineSelect">
+        <option value="kokoro" selected>Kokoro (Quality)</option>
+        <option value="piper">Piper (Fast)</option>
+      </select>
+    </div>
+    <p id="engineNote" class="engine-note">🎙 Quality mode: natural, expressive voice. Slower on long text.</p>
 
     <div class="row">
       <label for="accentSelect">Accent</label>
@@ -70,8 +79,9 @@
   </main>
 
   <footer>
-    Model: <a href="https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX" target="_blank" rel="noopener">onnx-community/Kokoro-82M-v1.0-ONNX</a>
-    on Hugging Face · 100% client-side, no API key required
+    Models: <a href="https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX" target="_blank" rel="noopener">Kokoro-82M</a>
+    &amp; <a href="https://github.com/rhasspy/piper" target="_blank" rel="noopener">Piper</a>
+    · 100% client-side, no API key required
   </footer>
 
   <script type="module" src="script.js"></script>

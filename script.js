@@ -38,7 +38,7 @@ const isMobile = /Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent);
 // This is just the DEFAULT auto-detected value - the user can override it via the
 // "Parallel" dropdown in the UI (see userPoolSize below), e.g. to dial it down if
 // their device struggles with the RAM footprint of multiple loaded model copies.
-const AUTO_POOL_SIZE = isMobile ? 2 : Math.min(5, Math.max(2, (navigator.hardwareConcurrency || 4) - 1));
+const AUTO_POOL_SIZE = isMobile ? 2 : Math.min(10, Math.max(2, (navigator.hardwareConcurrency || 4) - 1));
 let userPoolSize = AUTO_POOL_SIZE; // current effective pool size - set by the dropdown
 
 // Kokoro-82M voice IDs grouped by accent + gender.

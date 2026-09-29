@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>Free AI Text-to-Speech</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="card">
+    <h1>🔊 AI Text-to-Speech</h1>
+    <p class="subtitle">Powered by <strong>Kokoro-82M</strong> (open-source, runs free in your browser)</p>
+
+    <textarea id="textInput" rows="6" placeholder="Type or paste text here...">Hello! This is a free, open-source text-to-speech demo running entirely in your browser.</textarea>
+
+    <div class="row">
+      <label for="accentSelect">Accent</label>
+      <select id="accentSelect" disabled>
+        <option value="american">American English</option>
+        <option value="british">British English</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="genderSelect">Voice</label>
+      <select id="genderSelect" disabled>
+        <option value="female">Female</option>
+        <option value="male">Male</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="nameSelect">Style</label>
+      <select id="nameSelect" disabled>
+        <option>Loading...</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="speedSelect">Speed</label>
+      <select id="speedSelect">
+        <option value="1.0">1.0x</option>
+        <option value="1.2">1.2x</option>
+        <option value="1.3">1.3x</option>
+        <option value="1.4">1.4x</option>
+        <option value="1.5">1.5x</option>
+        <option value="1.6">1.6x</option>
+        <option value="1.7">1.7x</option>
+        <option value="1.8">1.8x</option>
+        <option value="1.9">1.9x</option>
+        <option value="2.0">2.0x</option>
+      </select>
+    </div>
+
+    <button id="generateBtn" disabled>Generate Speech</button>
+
+    <p id="status" class="status">Loading voice model, please wait (first load can take a bit)...</p>
+
+    <audio id="player" controls playsinline></audio>
+    <a id="downloadLink" href="#" download="speech.wav" class="hidden">Download audio</a>
+  </main>
+
+  <footer>
+    Model: <a href="https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX" target="_blank" rel="noopener">onnx-community/Kokoro-82M-v1.0-ONNX</a>
+    on Hugging Face · 100% client-side, no API key required
+  </footer>
+
+  <script type="module" src="script.js"></script>
+</body>
+</html>

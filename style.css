@@ -1,0 +1,160 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #ec4899 100%);
+  padding: 24px;
+}
+
+.card {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 32px;
+  max-width: 560px;
+  width: 100%;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 1.6rem;
+  color: #1f2937;
+  text-align: center;
+}
+
+.subtitle {
+  text-align: center;
+  color: #6b7280;
+  font-size: 0.9rem;
+  margin: 0 0 24px;
+}
+
+textarea {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid #d1d5db;
+  font-size: 1rem;
+  resize: vertical;
+  font-family: inherit;
+}
+
+textarea:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.row label {
+  font-weight: 600;
+  color: #374151;
+  min-width: 70px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 420px) {
+  .card {
+    padding: 20px;
+  }
+  .row {
+    flex-wrap: wrap;
+  }
+  .row label {
+    min-width: 100%;
+  }
+  select {
+    width: 100%;
+  }
+}
+
+select {
+  flex: 1;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #d1d5db;
+  font-size: 1rem;
+  background: #fff;
+}
+
+button {
+  width: 100%;
+  padding: 14px;
+  border: none;
+  border-radius: 10px;
+  background: #6366f1;
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.1s ease;
+}
+
+button:hover:not(:disabled) {
+  background: #4f46e5;
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+button:disabled {
+  background: #c7c7f5;
+  cursor: not-allowed;
+}
+
+.status {
+  text-align: center;
+  color: #6b7280;
+  font-size: 0.85rem;
+  min-height: 1.2em;
+  margin: 14px 0 4px;
+}
+
+audio {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.hidden {
+  display: none;
+}
+
+#downloadLink {
+  display: block;
+  text-align: center;
+  margin-top: 10px;
+  color: #6366f1;
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+
+#downloadLink:hover {
+  text-decoration: underline;
+}
+
+footer {
+  margin-top: 20px;
+  color: #f3f4f6;
+  font-size: 0.8rem;
+  text-align: center;
+  max-width: 560px;
+}
+
+footer a {
+  color: #fff;
+}

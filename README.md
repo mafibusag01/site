@@ -71,6 +71,12 @@ All four are free forever for a static site like this (no server, no database).
 - **Loading feedback**: the status text now shows live download percentage, has a 90-second
   timeout, and displays a clear tappable error (with retry) instead of hanging forever if the
   model fails to load (e.g. slow/unstable mobile connection, VPN/ad-blocker interference).
+- **Known bug fixed (2026-09-29)**: a prior revision imported a non-existent `env` export from
+  `kokoro-js`, which crashed the module load silently with zero visible error — the page just
+  sat on the static "Loading voice model, please wait..." text forever on every host (Netlify,
+  GitHub Pages, etc.). Fixed by importing only the real export (`KokoroTTS`) and wrapping the
+  library import itself in a try/catch with a timeout, so any future load failure now shows a
+  visible, tappable-to-retry error message instead of hanging silently.
 - **First load time**: the model (~80MB) downloads once and is cached by the browser;
   subsequent visits load instantly from cache. On mobile data this first load may take
   a bit — consider warning users to load on Wi-Fi.

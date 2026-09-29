@@ -9,16 +9,8 @@
 // with single-threaded execution (no SharedArrayBuffer / cross-origin-isolation headers
 // required - those aren't set by a plain Netlify static drop-deploy anyway).
 
-import { KokoroTTS, env } from "https://esm.sh/kokoro-js@1.2.1";
-
-// Force single-threaded WASM: avoids needing COOP/COEP headers (which Netlify's
-// default static hosting does not send) and avoids known hangs with multi-threaded
-// WASM + WebGPU on some Android Chrome builds.
-if (env && env.backends && env.backends.onnx && env.backends.onnx.wasm) {
-  env.backends.onnx.wasm.numThreads = 1;
-}
-
 const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+const KOKORO_CDN_URL = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm";
 const LOAD_TIMEOUT_MS = 90_000; // 90s - mobile data can be slow for an ~80MB download
 
 // Known Kokoro-82M voice IDs grouped by accent + gender, with friendly labels.
@@ -92,6 +84,24 @@ function withTimeout(promise, ms, timeoutMessage) {
 
 async function init() {
   try {
+    setStatus("Loading TTS engine (kokoro-js)...");
+
+    // Dynamic import wrapped in try/catch so a failure here (bad CDN response,
+    // network block, syntax/version mismatch, etc.) shows a visible error on the
+    // page instead of silently freezing the whole script with no feedback.
+    let KokoroTTS;
+    try {
+      const mod = await withTimeout(
+        import(/* @vite-ignore */ KOKORO_CDN_URL),
+        30_000,
+        "Timed out loading the kokoro-js library itself from the CDN."
+      );
+      KokoroTTS = mod.KokoroTTS;
+      if (!KokoroTTS) throw new Error("kokoro-js loaded but KokoroTTS export was not found.");
+    } catch (importErr) {
+      throw new Error("Could not load the kokoro-js library: " + importErr.message);
+    }
+
     setStatus("Loading voice model... 0% (downloading ~80MB, first visit only)");
 
     const loadPromise = KokoroTTS.from_pretrained(MODEL_ID, {

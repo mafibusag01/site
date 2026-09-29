@@ -3,15 +3,25 @@
 // Library: kokoro-js (https://www.npmjs.com/package/kokoro-js) - runs the model fully in the browser
 // No API key, no server, no per-request cost.
 //
-// IMPORTANT (mobile compatibility): WebGPU support on Android Chrome is inconsistent
-// across devices/drivers and can silently hang instead of failing cleanly. To guarantee
-// this works on Android Chrome (and every other browser), we ALWAYS use the WASM backend
-// with single-threaded execution (no SharedArrayBuffer / cross-origin-isolation headers
-// required - those aren't set by a plain Netlify static drop-deploy anyway).
+// MOBILE COMPATIBILITY: WebGPU support on Android Chrome is inconsistent across
+// devices/drivers and can silently hang instead of failing cleanly (confirmed on real
+// devices). So on mobile we ALWAYS use the WASM backend (proven reliable). On desktop
+// browsers we try WebGPU first (much faster for long texts) and automatically fall
+// back to WASM if it fails or times out.
+//
+// LONG TEXT HANDLING: text is split into sentence-sized chunks and generated one at a
+// time. Audio for each chunk starts playing via the Web Audio API as soon as it's
+// ready (instead of waiting for the whole 10k-word input to finish), and the status
+// bar shows live % progress + an ETA. All chunks are also stitched into one combined
+// WAV file for download once generation completes.
 
 const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const KOKORO_CDN_URL = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm";
-const LOAD_TIMEOUT_MS = 90_000; // 90s - mobile data can be slow for an ~80MB download
+const LOAD_TIMEOUT_MS = 90_000; // 90s - mobile data can be slow for the model download
+const WEBGPU_LOAD_TIMEOUT_MS = 25_000; // shorter probe - if WebGPU stalls, bail to WASM fast
+const MAX_CHUNK_CHARS = 350; // sentence-aware chunk size fed to the model per call
+
+const isMobile = /Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent);
 
 // Known Kokoro-82M voice IDs grouped by accent + gender, with friendly labels.
 const VOICE_CATALOG = {
@@ -69,6 +79,8 @@ const downloadLink = document.getElementById("downloadLink");
 
 let tts = null;
 let availableVoiceIds = null;
+let currentGenerationId = 0; // guards against overlapping generate() calls
+let activeAudioCtx = null;
 
 function setStatus(msg) {
   statusEl.textContent = msg;
@@ -82,48 +94,79 @@ function withTimeout(promise, ms, timeoutMessage) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+function formatEta(seconds) {
+  if (!isFinite(seconds) || seconds < 0) return "";
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return m > 0 ? `~${m}m ${s}s left` : `~${s}s left`;
+}
+
+async function loadKokoroLibrary() {
+  try {
+    const mod = await withTimeout(
+      import(/* @vite-ignore */ KOKORO_CDN_URL),
+      30_000,
+      "Timed out loading the kokoro-js library itself from the CDN."
+    );
+    if (!mod.KokoroTTS) throw new Error("kokoro-js loaded but KokoroTTS export was not found.");
+    return mod.KokoroTTS;
+  } catch (importErr) {
+    throw new Error("Could not load the kokoro-js library: " + importErr.message);
+  }
+}
+
 async function init() {
   try {
     setStatus("Loading TTS engine (kokoro-js)...");
+    const KokoroTTS = await loadKokoroLibrary();
 
-    // Dynamic import wrapped in try/catch so a failure here (bad CDN response,
-    // network block, syntax/version mismatch, etc.) shows a visible error on the
-    // page instead of silently freezing the whole script with no feedback.
-    let KokoroTTS;
-    try {
-      const mod = await withTimeout(
-        import(/* @vite-ignore */ KOKORO_CDN_URL),
-        30_000,
-        "Timed out loading the kokoro-js library itself from the CDN."
-      );
-      KokoroTTS = mod.KokoroTTS;
-      if (!KokoroTTS) throw new Error("kokoro-js loaded but KokoroTTS export was not found.");
-    } catch (importErr) {
-      throw new Error("Could not load the kokoro-js library: " + importErr.message);
+    const onProgress = (progress) => {
+      if (progress && typeof progress.progress === "number") {
+        const pct = Math.round(progress.progress);
+        setStatus(`Loading voice model... ${pct}% (downloading, first visit only)`);
+      } else if (progress && progress.status) {
+        setStatus(`Loading voice model... (${progress.status})`);
+      }
+    };
+
+    // Desktop: try WebGPU first (much faster inference for long texts), with a
+    // fast fallback to WASM if it stalls or errors. Mobile: skip straight to WASM,
+    // since WebGPU on Android Chrome has been observed to hang silently.
+    let backendUsed = "wasm";
+    if (!isMobile && navigator.gpu) {
+      try {
+        setStatus("Loading voice model (GPU-accelerated)... 0%");
+        tts = await withTimeout(
+          KokoroTTS.from_pretrained(MODEL_ID, {
+            dtype: "fp32",
+            device: "webgpu",
+            progress_callback: onProgress,
+          }),
+          WEBGPU_LOAD_TIMEOUT_MS,
+          "WebGPU load timed out"
+        );
+        backendUsed = "webgpu";
+      } catch (gpuErr) {
+        console.warn("WebGPU load failed, falling back to WASM:", gpuErr);
+        tts = null;
+      }
     }
 
-    setStatus("Loading voice model... 0% (downloading ~80MB, first visit only)");
-
-    const loadPromise = KokoroTTS.from_pretrained(MODEL_ID, {
-      dtype: "q8",
-      device: "wasm",
-      progress_callback: (progress) => {
-        if (progress && typeof progress.progress === "number") {
-          const pct = Math.round(progress.progress);
-          setStatus(`Loading voice model... ${pct}% (downloading ~80MB, first visit only)`);
-        } else if (progress && progress.status) {
-          setStatus(`Loading voice model... (${progress.status})`);
-        }
-      },
-    });
-
-    tts = await withTimeout(
-      loadPromise,
-      LOAD_TIMEOUT_MS,
-      "Model download timed out. Your connection may be too slow/unstable, or Hugging Face's " +
-        "servers may be temporarily unreachable from your network. Try switching to Wi-Fi, " +
-        "disabling any VPN/ad-blocker, and reloading the page."
-    );
+    if (!tts) {
+      setStatus("Loading voice model... 0% (downloading ~80MB, first visit only)");
+      const loadPromise = KokoroTTS.from_pretrained(MODEL_ID, {
+        dtype: "q8",
+        device: "wasm",
+        progress_callback: onProgress,
+      });
+      tts = await withTimeout(
+        loadPromise,
+        LOAD_TIMEOUT_MS,
+        "Model download timed out. Your connection may be too slow/unstable, or Hugging Face's " +
+          "servers may be temporarily unreachable from your network. Try switching to Wi-Fi, " +
+          "disabling any VPN/ad-blocker, and reloading the page."
+      );
+    }
 
     if (tts.voices && typeof tts.voices === "object") {
       availableVoiceIds = new Set(Object.keys(tts.voices));
@@ -137,14 +180,19 @@ async function init() {
     genderSelect.disabled = false;
     nameSelect.disabled = false;
     generateBtn.disabled = false;
-    setStatus("Model loaded. Ready to generate speech!");
+    setStatus(
+      `Model loaded (${backendUsed === "webgpu" ? "GPU-accelerated" : "CPU"} mode). Ready to generate speech!`
+    );
   } catch (err) {
     console.error("KokoroTTS load failed:", err);
-    setStatus(
-      "⚠ Failed to load the voice model: " +
-        (err && err.message ? err.message : "unknown error") +
-        " — Tap to retry."
-    );
+    const rawMsg = err && err.message ? err.message : "unknown error";
+    const friendlyMsg =
+      rawMsg === "Failed to fetch"
+        ? "Could not reach the model server (huggingface.co). This is usually caused by an " +
+          "ad-blocker/privacy extension, VPN, or firewall blocking that domain. Try an " +
+          "Incognito window with extensions disabled, or a different network."
+        : rawMsg;
+    setStatus("⚠ Failed to load the voice model: " + friendlyMsg + " — Tap to retry.");
     statusEl.style.cursor = "pointer";
     statusEl.onclick = () => {
       statusEl.style.cursor = "default";
@@ -175,6 +223,50 @@ function populateNameOptions() {
 
 accentSelect.addEventListener("change", populateNameOptions);
 genderSelect.addEventListener("change", populateNameOptions);
+
+// Splits long text into sentence-aware chunks so: (a) the model handles each request
+// reliably, (b) we can report incremental % progress, and (c) audio can start playing
+// before the entire input has been processed.
+function splitTextIntoChunks(text, maxLen = MAX_CHUNK_CHARS) {
+  const sentences = text.match(/[^.!?\n]+[.!?\n]*(\s+|$)/g) || [text];
+  const chunks = [];
+  let current = "";
+
+  for (let sentence of sentences) {
+    if (sentence.length > maxLen) {
+      // Extremely long "sentence" (no punctuation) - hard split on spaces.
+      const words = sentence.split(/(\s+)/);
+      for (const w of words) {
+        if ((current + w).length > maxLen) {
+          if (current.trim()) chunks.push(current.trim());
+          current = w;
+        } else {
+          current += w;
+        }
+      }
+      continue;
+    }
+    if ((current + sentence).length > maxLen) {
+      if (current.trim()) chunks.push(current.trim());
+      current = sentence;
+    } else {
+      current += sentence;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.filter((c) => c.length > 0);
+}
+
+function concatFloat32Arrays(arrays) {
+  const totalLen = arrays.reduce((sum, a) => sum + a.length, 0);
+  const result = new Float32Array(totalLen);
+  let offset = 0;
+  for (const arr of arrays) {
+    result.set(arr, offset);
+    offset += arr.length;
+  }
+  return result;
+}
 
 function encodeWav(samples, sampleRate) {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
@@ -207,13 +299,10 @@ function encodeWav(samples, sampleRate) {
   return new Blob([view], { type: "audio/wav" });
 }
 
-async function audioToBlob(audio) {
-  if (typeof audio.toBlob === "function") {
-    return await audio.toBlob();
-  }
+function extractSamples(audio) {
   const samples = audio.audio || audio.data;
   const sampleRate = audio.sampling_rate || audio.sample_rate || 24000;
-  return encodeWav(samples, sampleRate);
+  return { samples: samples instanceof Float32Array ? samples : new Float32Array(samples), sampleRate };
 }
 
 async function generate() {
@@ -227,33 +316,91 @@ async function generate() {
     return;
   }
 
+  // Invalidate any previous in-flight generation and stop its audio.
+  const myGenerationId = ++currentGenerationId;
+  if (activeAudioCtx) {
+    try {
+      activeAudioCtx.close();
+    } catch (e) {
+      /* ignore */
+    }
+    activeAudioCtx = null;
+  }
+
   const voiceId = nameSelect.value;
   const speed = parseFloat(speedSelect.value) || 1.0;
 
+  const chunks = splitTextIntoChunks(text);
+  const totalChars = chunks.reduce((sum, c) => sum + c.length, 0);
+
   generateBtn.disabled = true;
   generateBtn.textContent = "Generating...";
-  setStatus("Generating speech...");
+  downloadLink.classList.add("hidden");
+
+  // Create the AudioContext synchronously (within this user-gesture click handler)
+  // so mobile/desktop autoplay policies allow scheduled playback without an extra tap.
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const audioCtx = new AudioCtx();
+  activeAudioCtx = audioCtx;
+  let nextStartTime = audioCtx.currentTime + 0.05;
+
+  const allChunkSamples = [];
+  let sampleRateGlobal = 24000;
+  let processedChars = 0;
+  const startTime = performance.now();
 
   try {
-    const audio = await tts.generate(text, { voice: voiceId, speed });
-    const blob = await audioToBlob(audio);
+    for (let i = 0; i < chunks.length; i++) {
+      if (myGenerationId !== currentGenerationId) return; // superseded by a newer click
+
+      const audio = await tts.generate(chunks[i], { voice: voiceId, speed });
+      if (myGenerationId !== currentGenerationId) return;
+
+      const { samples, sampleRate } = extractSamples(audio);
+      sampleRateGlobal = sampleRate;
+      allChunkSamples.push(samples);
+
+      // Schedule this chunk to play immediately after the previous one - the user
+      // starts hearing audio after just the FIRST chunk, not after all of them.
+      const audioBuffer = audioCtx.createBuffer(1, samples.length, sampleRate);
+      audioBuffer.copyToChannel(samples, 0);
+      const source = audioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioCtx.destination);
+      const startAt = Math.max(nextStartTime, audioCtx.currentTime);
+      source.start(startAt);
+      nextStartTime = startAt + audioBuffer.duration;
+
+      processedChars += chunks[i].length;
+      const pct = Math.round((processedChars / totalChars) * 100);
+      const elapsedSec = (performance.now() - startTime) / 1000;
+      const remainingChars = totalChars - processedChars;
+      const etaSec = remainingChars > 0 ? (elapsedSec / processedChars) * remainingChars : 0;
+      setStatus(
+        `Generating speech... ${pct}% (chunk ${i + 1}/${chunks.length})` +
+          (chunks.length > 1 ? ` · ${formatEta(etaSec)} · playing as it's ready` : "")
+      );
+    }
+
+    if (myGenerationId !== currentGenerationId) return;
+
+    // Stitch every chunk together into one downloadable WAV file.
+    const combined = concatFloat32Arrays(allChunkSamples);
+    const blob = encodeWav(combined, sampleRateGlobal);
     const url = URL.createObjectURL(blob);
-
     player.src = url;
-    player.play().catch(() => {
-      // Autoplay may be blocked; user can press play on the visible controls.
-    });
-
     downloadLink.href = url;
     downloadLink.classList.remove("hidden");
 
-    setStatus("Done! Playing audio.");
+    setStatus(`Done! ${chunks.length > 1 ? "Full audio ready below." : "Playing audio."}`);
   } catch (err) {
     console.error("Generate failed:", err);
     setStatus("⚠ Error generating audio: " + (err && err.message ? err.message : "unknown error"));
   } finally {
-    generateBtn.disabled = false;
-    generateBtn.textContent = "Generate Speech";
+    if (myGenerationId === currentGenerationId) {
+      generateBtn.disabled = false;
+      generateBtn.textContent = "Generate Speech";
+    }
   }
 }
 

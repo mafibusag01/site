@@ -53,6 +53,28 @@ python3 -m http.server 8080
 
 All four are free forever for a static site like this (no server, no database).
 
+## Hugging Face Cloud API engine (optional, new)
+A third engine option, "Hugging Face Cloud API", calls HF's serverless Inference API
+directly from the browser using the visitor's OWN free HF account + personal access
+token (read scope is enough — create one at huggingface.co/settings/tokens).
+
+- **No local download, no RAM usage, no worker pool.** Inference runs on HF's servers,
+  so this works even on very low-end devices/old phones.
+- The "Parallel" dropdown becomes "Concurrent" in this mode and controls how many
+  simultaneous HTTP requests are in flight — switching it takes effect **instantly**,
+  no reload, since there's no model to load.
+- Default model is `microsoft/speecht5_tts` (reliable, available on HF's free tier).
+  The Model ID field is editable — swap in any other Hub TTS model you have access to
+  (note: many of the newest/flashiest models like Kokoro-hosted, Qwen3-TTS, Fish Audio,
+  or Breeze TTS 2 require a PAID Inference Provider plan, not the free serverless tier).
+- Token and model choice are saved to this browser's `localStorage` only — never sent
+  anywhere except directly to `api-inference.huggingface.co`.
+- Shared serverless models can be "cold" (not currently loaded on HF's end); the app
+  automatically retries with backoff using the `estimated_time` HF returns, so a first
+  request to a given model may take ~20-30s before falling back to HF's error response.
+- Accent/Voice/Style selectors are hidden in this mode since most Hub TTS models don't
+  expose a per-voice picker the way Kokoro/Piper do.
+
 ## Notes / things you can tweak
 - **Voice selection**: split into 3 dropdowns — **Accent** (American / British English),
   **Voice** (Male / Female), and **Style** (specific named voice within that combo, e.g.

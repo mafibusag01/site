@@ -4,12 +4,12 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
 <title>Free AI Text-to-Speech</title>
-<link rel="stylesheet" href="style.css?v=3" />
+<link rel="stylesheet" href="style.css?v=4" />
 </head>
 <body>
   <main class="card">
     <h1>🔊 AI Text-to-Speech</h1>
-    <p class="subtitle">Powered by <strong>Kokoro-82M</strong> or <strong>Piper</strong> (open-source, runs free in your browser)</p>
+    <p class="subtitle">Powered by <strong>Kokoro-82M</strong>, <strong>Piper</strong> (free, runs in your browser), or your own <strong>Hugging Face</strong> Cloud API token</p>
 
     <textarea id="textInput" rows="6" placeholder="Type or paste text here...">Hello! This is a free, open-source text-to-speech demo running entirely in your browser.</textarea>
 
@@ -21,11 +21,29 @@
     <div class="row">
       <label for="engineSelect">Engine</label>
       <select id="engineSelect">
-        <option value="kokoro" selected>Kokoro (Quality)</option>
-        <option value="piper">Piper (Fast)</option>
+        <option value="kokoro" selected>Kokoro (Quality, local)</option>
+        <option value="piper">Piper (Fast, local)</option>
+        <option value="hf">Hugging Face Cloud API</option>
       </select>
     </div>
     <p id="engineNote" class="engine-note">🎙 Quality mode: natural, expressive voice. Slower on long text.</p>
+
+    <div id="hfTokenRow" class="row hf-row hidden">
+      <label for="hfTokenInput">HF Token</label>
+      <input type="password" id="hfTokenInput" placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" autocomplete="off" />
+    </div>
+    <div id="hfModelRow" class="row hf-row hidden">
+      <label for="hfModelInput">Model ID</label>
+      <input type="text" id="hfModelInput" placeholder="microsoft/speecht5_tts" />
+    </div>
+    <p id="hfNote" class="engine-note hidden">
+      ☁️ Uses your own free Hugging Face account + API token - calls run on HF's servers, not your
+      device. Your token is stored only in this browser (localStorage), never sent anywhere except
+      directly to huggingface.co. Default model (SpeechT5) works on HF's free Inference API tier.
+      Need a token? Create one at
+      <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a>
+      (read access is enough). Some models may be "cold" on first call and take ~20-30s to spin up.
+    </p>
 
     <div class="row">
       <label for="parallelSelect">Parallel</label>
@@ -101,6 +119,6 @@
     · 100% client-side, no API key required
   </footer>
 
-  <script type="module" src="script.js?v=3"></script>
+  <script type="module" src="script.js?v=4"></script>
 </body>
 </html>

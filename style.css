@@ -117,13 +117,28 @@ textarea:focus {
   }
 }
 
-select {
+select,
+input[type="text"],
+input[type="password"] {
   flex: 1;
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid #d1d5db;
   font-size: 1rem;
   background: #fff;
+  font-family: inherit;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+.hf-row,
+.hf-panel {
+  align-items: center;
 }
 
 button {

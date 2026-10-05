@@ -53,10 +53,13 @@ python3 -m http.server 8080
 
 All four are free forever for a static site like this (no server, no database).
 
-## Hugging Face Cloud API engine (optional, new)
-A third engine option, "Hugging Face Cloud API", calls HF's serverless Inference API
-directly from the browser using the visitor's OWN free HF account + personal access
-token (read scope is enough — create one at huggingface.co/settings/tokens).
+## Hugging Face Cloud API engine (now the DEFAULT engine)
+The engine dropdown now defaults to "Hugging Face Cloud API", which calls HF's
+serverless Inference API directly from the browser using the visitor's OWN free HF
+account + personal access token (read scope is enough — create one at
+huggingface.co/settings/tokens). The Token and Model ID fields are shown right below
+the Engine dropdown whenever this option is selected. Kokoro and Piper (fully local,
+no token needed) are still available as alternatives in the same dropdown.
 
 - **No local download, no RAM usage, no worker pool.** Inference runs on HF's servers,
   so this works even on very low-end devices/old phones.

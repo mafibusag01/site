@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
 <title>Free AI Text-to-Speech</title>
-<link rel="stylesheet" href="style.css?v=4" />
+<link rel="stylesheet" href="style.css?v=5" />
 </head>
 <body>
   <main class="card">
@@ -21,22 +21,22 @@
     <div class="row">
       <label for="engineSelect">Engine</label>
       <select id="engineSelect">
-        <option value="kokoro" selected>Kokoro (Quality, local)</option>
+        <option value="hf" selected>Hugging Face Cloud API (Default)</option>
+        <option value="kokoro">Kokoro (Quality, local)</option>
         <option value="piper">Piper (Fast, local)</option>
-        <option value="hf">Hugging Face Cloud API</option>
       </select>
     </div>
-    <p id="engineNote" class="engine-note">🎙 Quality mode: natural, expressive voice. Slower on long text.</p>
+    <p id="engineNote" class="engine-note">☁️ Cloud mode: no download, works on any device, but requires your own free HF token/credit and an internet connection per request.</p>
 
-    <div id="hfTokenRow" class="row hf-row hidden">
+    <div id="hfTokenRow" class="row hf-row">
       <label for="hfTokenInput">HF Token</label>
       <input type="password" id="hfTokenInput" placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" autocomplete="off" />
     </div>
-    <div id="hfModelRow" class="row hf-row hidden">
+    <div id="hfModelRow" class="row hf-row">
       <label for="hfModelInput">Model ID</label>
       <input type="text" id="hfModelInput" placeholder="microsoft/speecht5_tts" />
     </div>
-    <p id="hfNote" class="engine-note hidden">
+    <p id="hfNote" class="engine-note">
       ☁️ Uses your own free Hugging Face account + API token - calls run on HF's servers, not your
       device. Your token is stored only in this browser (localStorage), never sent anywhere except
       directly to huggingface.co. Default model (SpeechT5) works on HF's free Inference API tier.
@@ -62,7 +62,7 @@
     </div>
     <p id="parallelNote" class="engine-note">Higher = faster, but uses more RAM (each worker loads its own copy of the model).</p>
 
-    <div class="row">
+    <div class="row hidden">
       <label for="accentSelect">Accent</label>
       <select id="accentSelect" disabled>
         <option value="american">American English</option>
@@ -70,7 +70,7 @@
       </select>
     </div>
 
-    <div class="row">
+    <div class="row hidden">
       <label for="genderSelect">Voice</label>
       <select id="genderSelect" disabled>
         <option value="female">Female</option>
@@ -103,7 +103,7 @@
 
     <button id="generateBtn" disabled>Generate Speech</button>
 
-    <p id="status" class="status">Loading voice model, please wait (first load can take a bit)...</p>
+    <p id="status" class="status">☁️ Cloud engine selected — paste your Hugging Face token above to enable it.</p>
 
     <div id="progressWrap" class="progress-wrap hidden">
       <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
@@ -119,6 +119,6 @@
     · 100% client-side, no API key required
   </footer>
 
-  <script type="module" src="script.js?v=4"></script>
+  <script type="module" src="script.js?v=5"></script>
 </body>
 </html>

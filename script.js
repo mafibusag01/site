@@ -1,43 +1,43 @@
-// Free, open-source, 100% client-side Text-to-Speech
-// Two selectable engines, both run fully in-browser via a Web Worker (see worker.js):
-//   - "kokoro": onnx-community/Kokoro-82M-v1.0-ONNX (kokoro-js). Natural, expressive
-//     voice, but slower (~1-2x realtime on CPU). Good default for shorter texts.
-//   - "piper": @diffusionstudio/vits-web (Piper/VITS). ~15-20x realtime on CPU -
-//     roughly 5,000 words in about a minute - but a more robotic/synthetic voice.
-//     Best for bulk/long-text jobs where speed matters more than natural delivery.
-// No API key, no server, no per-request cost.
+// Free, open-source Text-to-Speech, with an optional Hugging Face Cloud API engine.
+// Three selectable engines:
+//   - "kokoro": onnx-community/Kokoro-82M-v1.0-ONNX (kokoro-js), runs fully in-browser
+//     via a Web Worker. Natural, expressive voice, but slower (~1-2x realtime on CPU).
+//   - "piper": @diffusionstudio/vits-web (Piper/VITS), also fully in-browser via a Web
+//     Worker. ~15-20x realtime on CPU - roughly 5,000 words in about a minute - but a
+//     more robotic/synthetic voice. Best for bulk/long-text jobs.
+//   - "hf" (DEFAULT): Hugging Face Inference API (cloud). No local model/download/RAM
+//     cost at all - inference runs on HF's servers using the VISITOR'S OWN Hugging
+//     Face account token and Inference credit. Works on any device instantly, no
+//     model download wait. See generateChunkViaHF() below.
+// Kokoro/Piper: no API key, no server, no per-request cost, 100% client-side.
+// HF cloud engine: requires the user's own free Hugging Face account + access token.
 //
-// MAIN-THREAD RESPONSIVENESS: all model loading + inference now happens inside a
-// dedicated Web Worker (worker.js), not on the main thread. Previously, WASM
-// inference blocked the main thread for the FULL duration of each chunk's
-// computation - not just between chunks - so the page (including scrolling and
-// the Generate button) could still hang mid-chunk even with inter-chunk yields.
-// Running the model in a worker keeps the main thread 100% free for scrolling,
-// clicks, and smooth progress-bar animation regardless of how long a chunk takes.
+// MAIN-THREAD RESPONSIVENESS: all local model loading + inference happens inside a
+// dedicated Web Worker (worker.js), not on the main thread, so the page stays fully
+// interactive (scrolling, clicks, progress bar) regardless of how long a chunk takes.
 //
-// LONG TEXT HANDLING: text is split into sentence-sized chunks and generated one
-// at a time via the worker. Audio for each chunk starts playing via the Web Audio
-// API as soon as it's ready, and the status bar shows live % progress + an ETA.
-// All chunks are stitched into one combined WAV file for download once complete.
+// LONG TEXT HANDLING: text is split into sentence-sized chunks and generated in
+// parallel batches (local workers, or concurrent HF API requests). Audio for each
+// chunk starts playing via the Web Audio API as soon as it's ready, and the status
+// bar shows live % progress + an ETA. All chunks are stitched into one combined WAV
+// file for download once complete.
 
 const MAX_CHUNK_CHARS = 350; // sentence-aware chunk size fed to the model per call
 
 const isMobile = /Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent);
 
-// PARALLEL BATCH PROCESSING: instead of generating one chunk at a time, we run a
-// pool of Web Workers - each with its OWN fully-loaded copy of the model - and
-// hand out chunks to them round-robin, N at a time. Once a batch of N chunks all
-// finish, they're stitched into the output (in the correct order) and playback is
-// scheduled, then the next batch of N starts. This is a real speed multiplier
-// since chunks compute truly in parallel (separate threads), not just interleaved.
+// PARALLEL BATCH PROCESSING (local engines): instead of generating one chunk at a
+// time, we run a pool of Web Workers - each with its OWN fully-loaded copy of the
+// model - and hand out chunks to them round-robin, N at a time. Once a batch of N
+// chunks all finish, they're stitched into the output (in the correct order) and
+// playback is scheduled, then the next batch of N starts.
 //
-// Trade-off: each worker in the pool loads an independent copy of the model, so
-// RAM usage scales with pool size (5 workers ~= 5x the model's memory footprint).
-// Desktops can handle a bigger pool; mobile (especially Android, which we already
-// keep WASM-only for driver stability) gets a small pool to avoid tab crashes.
-// This is just the DEFAULT auto-detected value - the user can override it via the
-// "Parallel" dropdown in the UI (see userPoolSize below), e.g. to dial it down if
-// their device struggles with the RAM footprint of multiple loaded model copies.
+// Trade-off: each worker in the pool loads an independent copy of the model, so RAM
+// usage scales with pool size. Desktops can handle a bigger pool; mobile gets a
+// small pool to avoid tab crashes. This is just the DEFAULT auto-detected value -
+// the user can override it via the "Parallel"/"Concurrent" dropdown (userPoolSize).
+// For the HF cloud engine, this same number controls concurrent HTTP requests
+// instead (no model copies, so changing it is instant - no reload needed).
 const AUTO_POOL_SIZE = isMobile ? 2 : Math.min(10, Math.max(2, (navigator.hardwareConcurrency || 4) - 1));
 let userPoolSize = AUTO_POOL_SIZE; // current effective pool size - set by the dropdown
 
@@ -135,10 +135,28 @@ const wordCountEl = document.getElementById("wordCount");
 const clearBtn = document.getElementById("clearBtn");
 const engineNote = document.getElementById("engineNote");
 const parallelSelect = document.getElementById("parallelSelect");
+const hfTokenRow = document.getElementById("hfTokenRow");
+const hfModelRow = document.getElementById("hfModelRow");
+const hfTokenInput = document.getElementById("hfTokenInput");
+const hfModelInput = document.getElementById("hfModelInput");
+const hfNote = document.getElementById("hfNote");
+const parallelRow = parallelSelect.closest(".row");
+const accentRow = accentSelect.closest(".row");
+const genderRow = genderSelect.closest(".row");
+const parallelNoteEl = document.getElementById("parallelNote");
+
+const DEFAULT_HF_MODEL = "microsoft/speecht5_tts";
+
+// Persist token + model choice locally (this browser only) so the user doesn't have to
+// re-paste their token every visit. Never sent anywhere except api-inference.huggingface.co.
+hfTokenInput.value = localStorage.getItem("hf_tts_token") || "";
+hfModelInput.value = localStorage.getItem("hf_tts_model") || DEFAULT_HF_MODEL;
+hfTokenInput.addEventListener("input", () => localStorage.setItem("hf_tts_token", hfTokenInput.value.trim()));
+hfModelInput.addEventListener("input", () => localStorage.setItem("hf_tts_model", hfModelInput.value.trim() || DEFAULT_HF_MODEL));
 
 let workerPool = []; // array of { worker, ready } - each worker holds its OWN loaded model copy
 let availableVoiceIds = null; // Set, from engine "engineReady" message (kokoro only)
-let currentEngine = null; // engine actually loaded in the pool right now
+let currentEngine = null; // engine actually active right now ("kokoro" | "piper" | "hf")
 let currentGenerationId = 0; // guards against overlapping generate() calls
 let activeAudioCtx = null;
 let pendingChunkResolvers = new Map(); // chunkId -> {resolve, reject}
@@ -257,6 +275,8 @@ function setControlsEnabled(enabled) {
   genderSelect.disabled = !enabled;
   nameSelect.disabled = !enabled;
   generateBtn.disabled = !enabled;
+  hfTokenInput.disabled = !enabled;
+  hfModelInput.disabled = !enabled;
 }
 
 function onEngineLoadError(rawMsg) {
@@ -274,6 +294,9 @@ function onEngineLoadError(rawMsg) {
   };
 }
 
+// Loads a LOCAL engine (kokoro/piper) into a fresh pool of workers. Never called
+// for the "hf" engine - that one is handled entirely by activateHfEngine() below
+// since there's no local model to load.
 function loadEngine(engine) {
   setControlsEnabled(false);
   nameSelect.innerHTML = "<option>Loading...</option>";
@@ -295,27 +318,87 @@ function loadEngine(engine) {
   }
 }
 
+// Activates the HF cloud engine: no download, no worker pool - just marks it ready
+// immediately so the user can generate as soon as they've pasted a token.
+function activateHfEngine() {
+  engineGeneration++; // invalidate any in-flight messages from a previous local pool
+  terminatePool();
+  currentEngine = "hf";
+  availableVoiceIds = null;
+  hideProgress();
+  populateNameOptions();
+  setControlsEnabled(true);
+  setStatus(
+    hfTokenInput.value.trim()
+      ? "☁️ Cloud engine ready. Enter text and hit Generate."
+      : "☁️ Cloud engine selected — paste your Hugging Face token below to enable it."
+  );
+}
+
+function updateEngineUI() {
+  const engine = engineSelect.value;
+  const isHf = engine === "hf";
+
+  hfTokenRow.classList.toggle("hidden", !isHf);
+  hfModelRow.classList.toggle("hidden", !isHf);
+  hfNote.classList.toggle("hidden", !isHf);
+
+  // Accent/Voice/Style are meaningless for the generic HF cloud engine (most Hub TTS
+  // models don't expose per-voice selection the way Kokoro/Piper do) - hide them.
+  accentRow.classList.toggle("hidden", isHf);
+  genderRow.classList.toggle("hidden", isHf);
+
+  if (isHf) {
+    engineNote.textContent =
+      "☁️ Cloud mode: no download, works on any device, but requires your own free HF token/credit and an internet connection per request.";
+    parallelRow.querySelector("label").textContent = "Concurrent";
+    parallelNoteEl.textContent =
+      "Number of simultaneous requests sent to the Hugging Face API. Higher = faster, but may hit your account's rate limit. Takes effect instantly - no reload.";
+  } else {
+    parallelRow.querySelector("label").textContent = "Parallel";
+    parallelNoteEl.textContent = "Higher = faster, but uses more RAM (each worker loads its own copy of the model).";
+    engineNote.textContent =
+      engine === "piper"
+        ? "⚡ Fast mode: ~15-20x realtime, great for long/bulk text. Voice sounds more synthetic."
+        : "🎙 Quality mode: natural, expressive voice. Slower on long text.";
+  }
+}
+
 engineSelect.addEventListener("change", () => {
   hideProgress();
-  engineNote.textContent =
-    engineSelect.value === "piper"
-      ? "⚡ Fast mode: ~15-20x realtime, great for long/bulk text. Voice sounds more synthetic."
-      : "🎙 Quality mode: natural, expressive voice. Slower on long text.";
-  loadEngine(engineSelect.value);
+  updateEngineUI();
+  if (engineSelect.value === "hf") {
+    activateHfEngine();
+  } else {
+    loadEngine(engineSelect.value);
+  }
 });
 
-// Changing parallel worker count rebuilds the whole pool (each worker needs its
-// own freshly-loaded model copy), so this is disabled while a generation is
-// running (see setControlsEnabled) and simply reloads the current engine.
+updateEngineUI(); // reflect the default engine's UI state on first load
+
+// Changing parallel worker count rebuilds the whole local pool (each worker needs
+// its own freshly-loaded model copy); for the HF cloud engine there's no pool to
+// rebuild, so it just takes effect on the next generate() call - no reload at all.
 parallelSelect.addEventListener("change", () => {
   userPoolSize = parseInt(parallelSelect.value, 10) || 1;
-  loadEngine(engineSelect.value);
+  if (engineSelect.value !== "hf") {
+    loadEngine(engineSelect.value);
+  }
 });
 
 // Reflect the auto-detected default in the dropdown on first load.
 parallelSelect.value = String(AUTO_POOL_SIZE);
 
 function populateNameOptions() {
+  if (engineSelect.value === "hf") {
+    nameSelect.innerHTML = "";
+    const opt = document.createElement("option");
+    opt.value = "default";
+    opt.textContent = "Default (model's built-in voice)";
+    nameSelect.appendChild(opt);
+    return;
+  }
+
   const accent = accentSelect.value;
   const gender = genderSelect.value;
   let options = currentVoiceCatalog()[accent][gender];
@@ -441,6 +524,71 @@ function generateChunkOnWorker(workerEntry, text, voiceId, speed) {
   });
 }
 
+// Sends one chunk of text to the Hugging Face Inference API and decodes the returned
+// audio (format varies by model - WAV/FLAC/MP3 - so we use the browser's own decoder
+// rather than assuming a fixed WAV layout like the local worker path does).
+// HF's shared serverless models can be "cold" (not currently loaded on their end) and
+// respond with 503 + an estimated_time - we retry automatically a few times in that case.
+async function generateChunkViaHF(audioCtx, text) {
+  const token = hfTokenInput.value.trim();
+  const model = (hfModelInput.value.trim() || DEFAULT_HF_MODEL).replace(/^\/|\/$/g, "");
+  if (!token) throw new Error('No Hugging Face token set. Paste one in the "HF Token" field above.');
+
+  const url = `https://api-inference.huggingface.co/models/${model}`;
+  const maxRetries = 4;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ inputs: text }),
+    });
+
+    if (resp.ok) {
+      const arrayBuffer = await resp.arrayBuffer();
+      const decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+      return { samples: decoded.getChannelData(0).slice(), sampleRate: decoded.sampleRate };
+    }
+
+    // Model is loading on HF's side - wait and retry, same behavior as their own clients.
+    if (resp.status === 503 && attempt < maxRetries) {
+      let waitSec = 5;
+      try {
+        const body = await resp.json();
+        if (body && body.estimated_time) waitSec = Math.min(30, Math.ceil(body.estimated_time));
+      } catch (e) {
+        /* ignore parse failure, use default wait */
+      }
+      setStatus(`☁️ Model "${model}" is cold-starting on Hugging Face's servers... retrying in ${waitSec}s`);
+      await new Promise((r) => setTimeout(r, waitSec * 1000));
+      continue;
+    }
+
+    let detail = "";
+    try {
+      const body = await resp.json();
+      detail = body && body.error ? body.error : JSON.stringify(body);
+    } catch (e) {
+      detail = resp.statusText;
+    }
+    if (resp.status === 401 || resp.status === 403) {
+      throw new Error("Hugging Face rejected the token (unauthorized). Check it's valid and has read access.");
+    }
+    if (resp.status === 404) {
+      throw new Error(`Model "${model}" not found or not deployed on the free Inference API. Try a different Model ID.`);
+    }
+    if (resp.status === 429) {
+      throw new Error("Rate limited / out of Inference credit for this account. Try again later or reduce concurrency.");
+    }
+    throw new Error(`HF API error ${resp.status}: ${detail}`);
+  }
+
+  throw new Error("Model did not finish loading on Hugging Face's servers after several retries.");
+}
+
 async function generate() {
   const text = textInput.value.trim();
   if (!text) {
@@ -449,6 +597,10 @@ async function generate() {
   }
   if (!currentEngine) {
     setStatus("Model is not ready yet.");
+    return;
+  }
+  if (currentEngine === "hf" && !hfTokenInput.value.trim()) {
+    setStatus("⚠ Paste your Hugging Face token above first.");
     return;
   }
 
@@ -487,15 +639,17 @@ async function generate() {
   let sampleRateGlobal = 24000;
   let processedChars = 0;
   const startTime = performance.now();
-  const batchSize = Math.max(1, workerPool.length);
+  const isHf = currentEngine === "hf";
+  // Local engines are capped by how many workers actually loaded; the HF cloud engine
+  // has no worker pool at all, so concurrency there is just the user's chosen number
+  // of simultaneous in-flight fetch() requests.
+  const batchSize = isHf ? Math.max(1, userPoolSize) : Math.max(1, workerPool.length);
 
   try {
-    // BATCH PARALLEL PROCESSING: take up to `batchSize` chunks at a time and hand
-    // one to each free worker in the pool - they compute simultaneously on
-    // separate threads. Once the whole batch resolves, stitch/schedule that
-    // batch's audio in the correct original order, update progress once, then
-    // move on to the next batch. This is a genuine speed multiplier (not just
-    // interleaving) since the workers are truly running concurrently.
+    // BATCH PARALLEL PROCESSING: take up to `batchSize` chunks at a time and run
+    // them simultaneously (distinct local workers, or concurrent HF requests).
+    // Once the whole batch resolves, stitch/schedule that batch's audio in the
+    // correct original order, update progress once, then move on to the next batch.
     for (let batchStart = 0; batchStart < chunks.length; batchStart += batchSize) {
       if (myGenerationId !== currentGenerationId) return; // superseded by a newer click
 
@@ -504,13 +658,15 @@ async function generate() {
 
       setStatus(
         `Generating speech... chunks ${batchIndices[0] + 1}-${batchIndices[batchIndices.length - 1] + 1}` +
-          `/${chunks.length} in parallel (${batchIndices.length}x workers)...`
+          `/${chunks.length} in parallel (${batchIndices.length}x ${isHf ? "requests" : "workers"})...`
       );
 
-      // Fire off this batch's chunks to distinct workers, in order, and await them
-      // all together - this is what makes them run truly in parallel.
+      // Fire off this batch's chunks - to distinct local workers, or as concurrent HF
+      // API requests - in order, and await them all together so they run truly in parallel.
       const batchPromises = batchIndices.map((chunkIdx, slot) =>
-        generateChunkOnWorker(workerPool[slot], chunks[chunkIdx], voiceId, speed)
+        isHf
+          ? generateChunkViaHF(audioCtx, chunks[chunkIdx])
+          : generateChunkOnWorker(workerPool[slot], chunks[chunkIdx], voiceId, speed)
       );
       const batchResults = await Promise.all(batchPromises);
       if (myGenerationId !== currentGenerationId) return;
@@ -577,5 +733,10 @@ async function generate() {
 
 generateBtn.addEventListener("click", generate);
 
-// Boot: load the default engine (Kokoro) in the worker.
-loadEngine(engineSelect.value);
+// Boot: activate whichever engine is selected by default in the HTML. The HF cloud
+// engine needs no download, so it activates instantly; kokoro/piper load into workers.
+if (engineSelect.value === "hf") {
+  activateHfEngine();
+} else {
+  loadEngine(engineSelect.value);
+}

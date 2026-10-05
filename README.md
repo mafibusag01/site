@@ -66,14 +66,24 @@ no token needed) are still available as alternatives in the same dropdown.
 - The "Parallel" dropdown becomes "Concurrent" in this mode and controls how many
   simultaneous HTTP requests are in flight — switching it takes effect **instantly**,
   no reload, since there's no model to load.
-- Default model is `facebook/mms-tts-eng` (simple text-in/audio-out VITS model, works
-  on HF's free tier with just plain text — no extra parameters required). The Model ID
-  field is editable — swap in any other Hub TTS model you have access to, but note:
+- Default model is `espnet/kan-bayashi_ljspeech_vits` (simple text-in/audio-out VITS
+  model, works on HF's free tier with just plain text — no extra parameters required).
+  The Model ID field is editable — swap in any other Hub TTS model you have access to,
+  but note:
+  - **HF's free `hf-inference` provider only serves a curated, shifting subset of Hub
+    models.** A model that works today can start returning `400: Model not supported
+    by provider hf-inference` tomorrow if HF reshuffles their catalog — this is on
+    HF's end, not a bug in this app. The app automatically detects this specific error
+    and retries with a built-in fallback model (`HF_FALLBACK_MODELS` in script.js)
+    before giving up, so transient catalog changes self-heal without a code change.
+    If you still hit this error after the automatic fallback, go to the model's page
+    on huggingface.co and check it shows "Inference Available", or try a different
+    Model ID.
   - Many of the newest/flashiest models (Kokoro-hosted, Qwen3-TTS, Fish Audio, Breeze
     TTS 2) require a PAID Inference Provider plan, not the free serverless tier.
   - Some models (e.g. `microsoft/speecht5_tts`) require EXTRA request parameters (a
     512-float `speaker_embeddings` array) that this app does not send — using them as
-    the Model ID will fail. Stick to plain text-in/audio-out models like MMS-TTS.
+    the Model ID will fail. Stick to plain text-in/audio-out models like VITS/MMS-TTS.
 - **Endpoint**: requests go to `https://router.huggingface.co/hf-inference/models/<model>`
   — the older `api-inference.huggingface.co` host is deprecated and no longer reliably
   resolves (causes a generic "Failed to fetch" in the browser with zero HTTP response).

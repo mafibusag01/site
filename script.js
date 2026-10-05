@@ -145,21 +145,32 @@ const accentRow = accentSelect.closest(".row");
 const genderRow = genderSelect.closest(".row");
 const parallelNoteEl = document.getElementById("parallelNote");
 
-// facebook/mms-tts-eng is used as the default because it's a simple text-in/audio-out
-// VITS model that needs ONLY the `inputs` field - no extra required parameters.
+// espnet/kan-bayashi_ljspeech_vits is used as the default: a single-speaker VITS
+// model that needs ONLY the `inputs` field (no speaker embeddings/extra params),
+// and has long been HF's own canonical example model for the TTS inference task.
 // (microsoft/speecht5_tts, by contrast, REQUIRES a 512-float `speaker_embeddings`
-// array in the request body or it errors out - not worth the complexity as a default.)
-const DEFAULT_HF_MODEL = "facebook/mms-tts-eng";
+// array in the request body or it errors out.)
+//
+// IMPORTANT CONTEXT: HF's free `hf-inference` provider only serves a curated,
+// shifting subset of Hub models - a model that works today can 400 with "Model not
+// supported by provider hf-inference" tomorrow if HF's catalog changes. Rather than
+// hardcode one model and hope, generateChunkViaHF() below auto-detects that specific
+// error and silently retries with the next model in HF_FALLBACK_MODELS, so the app
+// keeps working even if HF reshuffles which models are hosted.
+const DEFAULT_HF_MODEL = "espnet/kan-bayashi_ljspeech_vits";
+const HF_FALLBACK_MODELS = ["facebook/mms-tts-eng"];
 
 // Persist token + model choice locally (this browser only) so the user doesn't have to
 // re-paste their token every visit. Never sent anywhere except api-inference.huggingface.co.
 hfTokenInput.value = localStorage.getItem("hf_tts_token") || "";
-// Auto-migrate users who still have the OLD default ("microsoft/speecht5_tts") saved
-// from a previous version of this app - that model requires extra `speaker_embeddings`
-// this app doesn't send, so it would always fail. Anyone who deliberately typed a
-// different model keeps their own choice untouched.
+// Auto-migrate users who still have an OLD/broken default saved in localStorage from
+// a previous version of this app ("microsoft/speecht5_tts" needs speaker_embeddings
+// this app doesn't send; "facebook/mms-tts-eng" turned out not to be deployed on HF's
+// free hf-inference provider). Anyone who deliberately typed a different model keeps
+// their own choice untouched.
+const KNOWN_BROKEN_DEFAULTS = ["microsoft/speecht5_tts", "facebook/mms-tts-eng"];
 const storedModel = localStorage.getItem("hf_tts_model");
-hfModelInput.value = storedModel && storedModel !== "microsoft/speecht5_tts" ? storedModel : DEFAULT_HF_MODEL;
+hfModelInput.value = storedModel && !KNOWN_BROKEN_DEFAULTS.includes(storedModel) ? storedModel : DEFAULT_HF_MODEL;
 hfTokenInput.addEventListener("input", () => localStorage.setItem("hf_tts_token", hfTokenInput.value.trim()));
 hfModelInput.addEventListener("input", () => localStorage.setItem("hf_tts_model", hfModelInput.value.trim() || DEFAULT_HF_MODEL));
 
@@ -540,9 +551,37 @@ function generateChunkOnWorker(workerEntry, text, voiceId, speed) {
 // respond with 503 + an estimated_time - we retry automatically a few times in that case.
 async function generateChunkViaHF(audioCtx, text) {
   const token = hfTokenInput.value.trim();
-  const model = (hfModelInput.value.trim() || DEFAULT_HF_MODEL).replace(/^\/|\/$/g, "");
+  const userModel = (hfModelInput.value.trim() || DEFAULT_HF_MODEL).replace(/^\/|\/$/g, "");
   if (!token) throw new Error('No Hugging Face token set. Paste one in the "HF Token" field above.');
 
+  // Try the user's chosen/default model first, then fall through to known-good
+  // fallbacks ONLY when HF's provider rejects the model outright (400 "not supported
+  // by provider") - never on auth/rate-limit/cold-start errors, which aren't model
+  // problems and would just fail identically on a fallback too.
+  const candidates = [userModel, ...HF_FALLBACK_MODELS.filter((m) => m !== userModel)];
+
+  let lastErr = null;
+  for (let modelIdx = 0; modelIdx < candidates.length; modelIdx++) {
+    const model = candidates[modelIdx];
+    try {
+      return await tryHfModel(audioCtx, token, model, text, modelIdx > 0);
+    } catch (err) {
+      lastErr = err;
+      if (err && err.hfUnsupportedModel && modelIdx < candidates.length - 1) {
+        setStatus(`☁️ Model "${model}" isn't available on HF's free tier right now — trying "${candidates[modelIdx + 1]}" instead...`);
+        continue; // next candidate
+      }
+      throw err; // not a "model unsupported" error, or no more fallbacks left
+    }
+  }
+  throw lastErr;
+}
+
+// Attempts ONE specific model. Throws an Error with `.hfUnsupportedModel = true` when
+// HF's router rejects the model itself (so the caller knows it's safe to fall back to
+// a different model), vs. a plain Error for anything else (auth, rate-limit, etc.)
+// which would affect any model equally and should just surface to the user as-is.
+async function tryHfModel(audioCtx, token, model, text, isFallback) {
   // NOTE: the old `api-inference.huggingface.co` host is deprecated (HF migrated all
   // Inference API traffic to the unified "router" in 2025) and no longer reliably
   // resolves/responds - calling it causes a generic "Failed to fetch" in the browser
@@ -590,8 +629,20 @@ async function generateChunkViaHF(audioCtx, text) {
     if (resp.status === 401 || resp.status === 403) {
       throw new Error("Hugging Face rejected the token (unauthorized). Check it's valid and has read access.");
     }
-    if (resp.status === 404) {
-      throw new Error(`Model "${model}" not found or not deployed on the free Inference API. Try a different Model ID.`);
+    // HF's router returns 400 (sometimes 404) with a message like "Model X is not
+    // supported by provider hf-inference" when that specific model isn't deployed on
+    // the free serverless tier - this is a MODEL problem, not a request problem, so
+    // it's safe to let the caller retry with a different, known-good model.
+    const unsupported =
+      (resp.status === 400 || resp.status === 404) && /not supported by provider|not found|not deployed/i.test(detail || "");
+    if (unsupported) {
+      const e = new Error(
+        isFallback
+          ? `Fallback model "${model}" is also not supported by HF's free tier right now (${detail}).`
+          : `Model "${model}" not supported by HF's free Inference API (${detail}).`
+      );
+      e.hfUnsupportedModel = true;
+      throw e;
     }
     if (resp.status === 429) {
       throw new Error("Rate limited / out of Inference credit for this account. Try again later or reduce concurrency.");

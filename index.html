@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
 <title>Free AI Text-to-Speech</title>
-<link rel="stylesheet" href="style.css?v=5" />
+<link rel="stylesheet" href="style.css?v=7" />
 </head>
 <body>
   <main class="card">
@@ -34,15 +34,18 @@
     </div>
     <div id="hfModelRow" class="row hf-row">
       <label for="hfModelInput">Model ID</label>
-      <input type="text" id="hfModelInput" placeholder="microsoft/speecht5_tts" />
+      <input type="text" id="hfModelInput" placeholder="facebook/mms-tts-eng" />
     </div>
     <p id="hfNote" class="engine-note">
       ☁️ Uses your own free Hugging Face account + API token - calls run on HF's servers, not your
       device. Your token is stored only in this browser (localStorage), never sent anywhere except
-      directly to huggingface.co. Default model (SpeechT5) works on HF's free Inference API tier.
-      Need a token? Create one at
+      directly to huggingface.co. Default model (Facebook MMS-TTS English) works on HF's free
+      Inference API tier with plain text input. Need a token? Create one at
       <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a>
-      (read access is enough). Some models may be "cold" on first call and take ~20-30s to spin up.
+      (read access is enough). Note: some Hub TTS models (e.g. microsoft/speecht5_tts) require
+      extra parameters like speaker embeddings this app doesn't send - if you swap the Model ID,
+      pick a plain text-in/audio-out model. Some models may be "cold" on first call and take
+      ~20-30s to spin up.
     </p>
 
     <div class="row">
@@ -119,6 +122,6 @@
     · 100% client-side, no API key required
   </footer>
 
-  <script type="module" src="script.js?v=5"></script>
+  <script type="module" src="script.js?v=7"></script>
 </body>
 </html>

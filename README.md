@@ -66,10 +66,17 @@ no token needed) are still available as alternatives in the same dropdown.
 - The "Parallel" dropdown becomes "Concurrent" in this mode and controls how many
   simultaneous HTTP requests are in flight — switching it takes effect **instantly**,
   no reload, since there's no model to load.
-- Default model is `microsoft/speecht5_tts` (reliable, available on HF's free tier).
-  The Model ID field is editable — swap in any other Hub TTS model you have access to
-  (note: many of the newest/flashiest models like Kokoro-hosted, Qwen3-TTS, Fish Audio,
-  or Breeze TTS 2 require a PAID Inference Provider plan, not the free serverless tier).
+- Default model is `facebook/mms-tts-eng` (simple text-in/audio-out VITS model, works
+  on HF's free tier with just plain text — no extra parameters required). The Model ID
+  field is editable — swap in any other Hub TTS model you have access to, but note:
+  - Many of the newest/flashiest models (Kokoro-hosted, Qwen3-TTS, Fish Audio, Breeze
+    TTS 2) require a PAID Inference Provider plan, not the free serverless tier.
+  - Some models (e.g. `microsoft/speecht5_tts`) require EXTRA request parameters (a
+    512-float `speaker_embeddings` array) that this app does not send — using them as
+    the Model ID will fail. Stick to plain text-in/audio-out models like MMS-TTS.
+- **Endpoint**: requests go to `https://router.huggingface.co/hf-inference/models/<model>`
+  — the older `api-inference.huggingface.co` host is deprecated and no longer reliably
+  resolves (causes a generic "Failed to fetch" in the browser with zero HTTP response).
 - Token and model choice are saved to this browser's `localStorage` only — never sent
   anywhere except directly to `api-inference.huggingface.co`.
 - Shared serverless models can be "cold" (not currently loaded on HF's end); the app

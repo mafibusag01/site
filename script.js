@@ -145,12 +145,21 @@ const accentRow = accentSelect.closest(".row");
 const genderRow = genderSelect.closest(".row");
 const parallelNoteEl = document.getElementById("parallelNote");
 
-const DEFAULT_HF_MODEL = "microsoft/speecht5_tts";
+// facebook/mms-tts-eng is used as the default because it's a simple text-in/audio-out
+// VITS model that needs ONLY the `inputs` field - no extra required parameters.
+// (microsoft/speecht5_tts, by contrast, REQUIRES a 512-float `speaker_embeddings`
+// array in the request body or it errors out - not worth the complexity as a default.)
+const DEFAULT_HF_MODEL = "facebook/mms-tts-eng";
 
 // Persist token + model choice locally (this browser only) so the user doesn't have to
 // re-paste their token every visit. Never sent anywhere except api-inference.huggingface.co.
 hfTokenInput.value = localStorage.getItem("hf_tts_token") || "";
-hfModelInput.value = localStorage.getItem("hf_tts_model") || DEFAULT_HF_MODEL;
+// Auto-migrate users who still have the OLD default ("microsoft/speecht5_tts") saved
+// from a previous version of this app - that model requires extra `speaker_embeddings`
+// this app doesn't send, so it would always fail. Anyone who deliberately typed a
+// different model keeps their own choice untouched.
+const storedModel = localStorage.getItem("hf_tts_model");
+hfModelInput.value = storedModel && storedModel !== "microsoft/speecht5_tts" ? storedModel : DEFAULT_HF_MODEL;
 hfTokenInput.addEventListener("input", () => localStorage.setItem("hf_tts_token", hfTokenInput.value.trim()));
 hfModelInput.addEventListener("input", () => localStorage.setItem("hf_tts_model", hfModelInput.value.trim() || DEFAULT_HF_MODEL));
 
@@ -534,7 +543,11 @@ async function generateChunkViaHF(audioCtx, text) {
   const model = (hfModelInput.value.trim() || DEFAULT_HF_MODEL).replace(/^\/|\/$/g, "");
   if (!token) throw new Error('No Hugging Face token set. Paste one in the "HF Token" field above.');
 
-  const url = `https://api-inference.huggingface.co/models/${model}`;
+  // NOTE: the old `api-inference.huggingface.co` host is deprecated (HF migrated all
+  // Inference API traffic to the unified "router" in 2025) and no longer reliably
+  // resolves/responds - calling it causes a generic "Failed to fetch" in the browser
+  // since the request fails before any HTTP response (and thus before any CORS check).
+  const url = `https://router.huggingface.co/hf-inference/models/${model}`;
   const maxRetries = 4;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
